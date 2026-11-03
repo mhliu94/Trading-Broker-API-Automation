@@ -10,7 +10,7 @@ import re
 import time
 from urllib.parse import quote, urlencode
 
-from .errors import BrokerError, CommandError, OutcomeUnknown
+from .errors import AuthenticationError, BrokerError, CancellationDiscoveryError, CommandError, OutcomeUnknown
 
 
 LONG_OPEN = {
@@ -270,9 +270,8 @@ def _zhuorui(adapter, operation, command):
             "scope": "Configured account's US orders returned by the upstream current-orders endpoint"}
 
 
-def cancel_open_orders(adapter, broker, command=None):
-    """Cancel discovered US-stock orders only; account-wide bulk delete is unsafe."""
-    if broker=="zhuorui":return _zhuorui(adapter,"cancel_open_orders",command)
+def _discover_open_orders(adapter, broker):
+    """Read and validate the entire cancellation scope before any writes."""
     if broker=="alpaca":
         rows=[];seen=set();params={"status":"open","limit":500,"direction":"desc","nested":"false"}
         for _ in range(int(adapter.config.get("max_pages",10000))):
@@ -288,4 +287,20 @@ def cancel_open_orders(adapter, broker, command=None):
         loaders={"robinhood":_rh_orders,"tradestation":_ts_orders,"longbridge":_long_orders,"webull":_webull_orders,"bitget":_bitget_orders}
         if broker not in loaders:raise CommandError("Unknown cancellation broker")
         rows=loaders[broker](adapter)
+    return rows
+
+
+def cancel_open_orders(adapter, broker, command=None):
+    """Cancel discovered US-stock orders only; account-wide bulk delete is unsafe."""
+    if broker=="zhuorui":return _zhuorui(adapter,"cancel_open_orders",command)
+    try:
+        rows = _discover_open_orders(adapter, broker)
+    except (AuthenticationError, CommandError):
+        raise
+    except Exception as exc:
+        # This boundary contains reads only. In particular, a transport timeout
+        # here cannot mean that a cancellation was accepted. Once _requests
+        # starts, its partial/uncertain write results must retain their meaning.
+        message = str(exc) if isinstance(exc, BrokerError) else "Open-order discovery failed"
+        raise CancellationDiscoveryError(message + "; no cancellations sent") from exc
     return _requests(broker,rows,lambda row:_send(adapter,broker,row))

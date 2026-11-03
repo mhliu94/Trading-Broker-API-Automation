@@ -28,6 +28,8 @@ The worker handles `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_FOK`, `CANCEL_ORD
 
 SIGINT, SIGTERM and the stop-file control request shutdown after the current operation. A stop request does not cancel broker orders. Health records show the last result/refresh and whether authentication or reconciliation is required. Linux status checks compare process-start identity, avoiding a recycled PID; other platforms explicitly report when that live-process check is unavailable. Custom status/stop paths can be set in Kafka configuration; the helper's default paths use `.state/<broker>.*`.
 
+For direct broker adapters, cancel-all discovery finishes before any cancellation writes. Discovery failures reject only that command with `requests_sent:0` and `submission_outcome:not_submitted`; they do not create an unknown journal entry or stop the listener. Authentication failures still stop intake, and uncertain writes still require reconciliation. Zhuorui's upstream combined cancellation operation retains its own outcome handling. Unknown entries from older versions require evidence-based review; a code upgrade alone does not resolve them.
+
 ## Account and order reporting
 
 With `kafka.publish_snapshots:true` (the live default), startup and periodic refreshes publish account snapshots to `account-details` and full order snapshots to `order-status`. The example interval is 30 seconds, scheduled from completion of the previous refresh attempt. After an order/cancellation, the worker commits the processed input and waits two seconds before refreshing; reporting failure never resubmits that financial command. Persistent trading controls and explicit account/order queries also refresh reporting.

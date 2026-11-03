@@ -1,5 +1,42 @@
 # US-stock delivery verification
 
+## Bitget cancel-all regression, 2026-11-03
+
+The five Bitget Kafka groups stopped immediately after their respective
+`CANCEL_OPEN_ORDERS` messages from 2026-11-02 22:51:07 UTC. The local
+`BITGET_HUANGFANG` journal recorded a history-pagination read failure as an
+unknown cancellation, causing the consumer to stop with
+`reconciliation_required`. A read-only live request reproduced a successful
+history response containing 53 orders and no `hasMore` field.
+
+The fix accepts omitted flags on pages below the [documented 1000-order
+limit](https://www.bitget.com/docs/catalog/stock-plus/orders), subdivides full
+pages without a flag, and rejects explicitly malformed flags. Cancel-all read
+failures are recorded as rejected with zero cancellation requests; uncertain
+writes and authentication failures retain their stop behavior.
+
+Validation on this server with Python 3.12:
+
+- **796 tests and 35 subtests passed, with no failures or skips.** Socket
+  connections were disabled for the entire final pytest run. The repository's
+  optional Webull SDK was installed so its existing tests were included.
+- Regression coverage includes the observed 53-order response, empty/short/full
+  pages, pagination boundaries and malformed flags, old GTC discovery, continued
+  Kafka consumption after read failures, durable rejection/replay handling,
+  uncertain first and partial cancellation writes, authentication failures, and
+  preservation of existing unknown journal entries.
+- Live read-only `open_stock_orders()` succeeded with two GET requests, no
+  writes, and zero currently open orders. `bitget/start.py --check` passed its
+  Kafka, account, current-day order and instrument checks.
+- All 164 project Python files parsed; `git diff --check` and `pip check` passed.
+
+No live order or cancellation was submitted and no worker was restarted during
+this verification. The local incident journal entry was preserved. Other
+servers' files were not changed; they require the same code update and review
+of their own failed commands before restarting.
+
+## Original delivery
+
 Verified on 2026-10-25:
 
 - **736 automated tests passed, plus 35 unittest subtests.** The final full run explicitly disabled socket connections, so tests could not contact brokers or publish Kafka messages.

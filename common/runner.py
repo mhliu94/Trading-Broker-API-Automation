@@ -4,7 +4,7 @@ import math
 import time
 from pathlib import Path
 from .commands import normalize, validate_age
-from .errors import AuthenticationError, BrokerError, CommandError, ConfigurationError, OutcomeUnknown
+from .errors import AuthenticationError, BrokerError, CancellationDiscoveryError, CommandError, ConfigurationError, OutcomeUnknown
 from .journal import Journal
 from .locking import operation_lock
 from .registry import adapter_for
@@ -201,9 +201,11 @@ class Runner:
         except Exception as exc:
             # A failed write can be ambiguous, including adapter decoding failures.
             # Never automatically retry any recorded submission attempt.
-            result = {**base, "status": "rejected" if isinstance(exc, CommandError) else ("unknown" if mutation else "error"),
+            result = {**base, "status": "rejected" if isinstance(exc, (CommandError, CancellationDiscoveryError)) else ("unknown" if mutation else "error"),
                       "error_type": type(exc).__name__,
                       "error": str(exc) if isinstance(exc, BrokerError) else "Broker operation failed; inspect local configuration and reconcile before retrying"}
+            if isinstance(exc, CancellationDiscoveryError):
+                result.update(submission_outcome="not_submitted", requests_sent=0)
             if isinstance(exc,AuthenticationError):
                 result["status"]="authentication_required"
                 if action=="place_order" and exc.no_submission and self.journal:

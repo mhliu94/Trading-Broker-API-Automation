@@ -222,7 +222,7 @@ def test_empty_live_history_without_has_more_allows_account_order_refresh():
     assert adapter.orders_today(start, start + timedelta(days=1)) == []
 
 
-@pytest.mark.parametrize("data", [{"orders": [], "hasMore": True}, {"orders": [order()]},
+@pytest.mark.parametrize("data", [{"orders": [], "hasMore": True},
                                  {"orders": [], "hasMore": "false"}, {"orders": [], "hasMore": None},
                                  {"orders": [], "hasMore": 0}, {"orders": None}])
 def test_history_cannot_claim_complete_on_overflow_or_invalid_metadata(data):

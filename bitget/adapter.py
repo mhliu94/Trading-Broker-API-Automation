@@ -25,6 +25,7 @@ AUTH_ERROR_CODES = {"40001", "40002", "40003", "40006", "40009", "40011", "40012
                     "40014", "40018", "40025", "40030", "40036", "40037", "40038",
                     "40039", "40040", "40041", "40065", "40084"}
 PREFIX = "/api/v3/stockplus"
+HISTORY_PAGE_LIMIT = 1000
 TERMINAL = {"Filled", "Rejected", "Canceled", "Expired", "PartialWithdrawal"}
 ACTIVE = {"NotReported", "ReplacedNotReported", "ProtectedNotReported", "VarietiesNotReported",
           "WaitToNew", "New", "WaitToReplace", "PendingReplace", "Replaced", "PartialFilled",
@@ -285,16 +286,15 @@ class Adapter:
             data = self._request("GET", PREFIX + "/trade/history-orders",
                                  {"market": "US", "startAt": low, "endAt": high})
             rows = self._list(data, "orders")
-            # Live Stock+ returns {"orders": []} for an empty interval, omitting
-            # hasMore. Only that empty response establishes an exhausted window;
-            # nonempty pages and explicit malformed flags still fail closed.
-            if "hasMore" not in data and not rows:
-                continue
-            if type(data.get("hasMore")) is not bool:
-                raise BrokerError("Stock+ history omitted boolean hasMore; completeness is unknown")
-            if data["hasMore"]:
+            # Live Stock+ omits hasMore on nonempty pages too. Its documented
+            # cap is 1000 orders: a shorter page is complete, but a full page
+            # without the flag must be split rather than silently truncated.
+            if "hasMore" in data and type(data["hasMore"]) is not bool:
+                raise BrokerError("Stock+ history returned invalid boolean hasMore; completeness is unknown")
+            has_more = data.get("hasMore", len(rows) >= HISTORY_PAGE_LIMIT)
+            if has_more:
                 if low == high:
-                    raise BrokerError("Stock+ history exceeds 1000 orders within one second; result is incomplete")
+                    raise BrokerError("Stock+ history cannot establish completeness within one second")
                 middle = (low + high) // 2
                 pending.extend(((middle + 1, high), (low, middle)))
             else:

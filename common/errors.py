@@ -32,3 +32,7 @@ class CommandError(BrokerError):
 
 class OutcomeUnknown(BrokerError):
     """An order may have reached the broker; reconcile before taking further action."""
+
+
+class CancellationDiscoveryError(BrokerError):
+    """Open-order discovery failed before any cancellation write was attempted."""
