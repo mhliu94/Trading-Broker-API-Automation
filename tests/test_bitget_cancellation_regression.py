@@ -155,7 +155,7 @@ def test_worker_processes_next_command_after_empty_scope_or_discovery_failure(
 
 
 @pytest.mark.parametrize("successful_writes", [0, 1])
-def test_worker_still_stops_and_preserves_unknown_actual_cancellation(
+def test_worker_continues_and_preserves_unknown_actual_cancellation(
         runner, monkeypatch, capsys, successful_writes):
     entries = [order("01"), order("02"), order("03")]
     responses = [{"orders": entries}, {"orders": []}]
@@ -166,9 +166,10 @@ def test_worker_still_stops_and_preserves_unknown_actual_cancellation(
             {"orderId": entries[index]["orderId"], "symbol": "AAPL.US"}
             if index < successful_writes else OutcomeUnknown("Cancellation write timed out"),
         ])
+    responses.extend(entries[:successful_writes + 1])
     runner.adapter._request = Mock(side_effect=responses)
     consumer = run_consumer(monkeypatch, runner)
-    assert consumer.poll.call_count == consumer.commit.call_count == 1
+    assert consumer.poll.call_count == consumer.commit.call_count == 2
     unresolved = runner.journal.unresolved(runner.scope)
     assert len(unresolved) == 1 and unresolved[0]["state"] == "unknown"
     assert runner.process(cancel_command())["duplicate"] is True
@@ -202,9 +203,8 @@ def test_existing_unknown_cancellation_is_not_cleared_by_upgrade(runner, monkeyp
     runner.journal.finish(runner.scope, command["id"], {"id": command["id"], "status": "unknown"})
     runner.adapter._request = Mock()
     consumer = run_consumer(monkeypatch, runner)
-    consumer.poll.assert_not_called()
-    consumer.commit.assert_not_called()
-    runner.adapter._request.assert_not_called()
+    assert consumer.poll.call_count == consumer.commit.call_count == 2
+    assert all(call.args[0] == "GET" for call in runner.adapter._request.call_args_list)
     assert runner.journal.unresolved(runner.scope)[0]["state"] == "unknown"
     health = json.loads(runner.journal_path.with_suffix(".status.json").read_text())
     assert health["status"] == "reconciliation_required"

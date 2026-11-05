@@ -100,6 +100,10 @@ def _consume(runner, config, max_messages=0):
     stopped = False
     authentication_required = False
     reconciliation_required = False
+    automatic_reconciliation = (runner.execute and runner.broker == "bitget"
+                                and isinstance(getattr(runner, "journal", None), Journal))
+    next_reconciliation = math.inf
+    reconciliation_attempts = 0
     health = None
     old_handlers = {}
     if isinstance(getattr(runner,"journal_path",None),Path):
@@ -127,29 +131,75 @@ def _consume(runner, config, max_messages=0):
             print(encoded({"event":"snapshot_refresh","trigger":trigger,"error":str(exc)}),flush=True)
         finally:
             next_refresh = time.monotonic() + interval
+
+    def reconcile():
+        nonlocal reconciliation_required, next_reconciliation, reconciliation_attempts
+        nonlocal authentication_required, stopped
+        attempt = reconciliation_attempts + 1
+        try:
+            report = runner.reconcile_pending()
+        except Exception as exc:
+            if type(exc).__name__ == "AuthenticationError":
+                authentication_required = stopped = True
+            report = {"status": "pending", "error_type": type(exc).__name__,
+                      "error": str(exc) if isinstance(exc, BrokerError) else "Order reconciliation failed"}
+        reconciliation_required = report["status"] == "pending"
+        if reconciliation_required:
+            reconciliation_attempts = attempt
+            delay = {1: 20, 2: 40}.get(attempt)
+        else:
+            reconciliation_attempts = 0
+            delay = None
+        next_reconciliation = time.monotonic() + delay if delay is not None else math.inf
+        retry_exhausted = reconciliation_required and delay is None
+        if reconciliation_required or report.get("resolved") or authentication_required:
+            print(encoded({"event": "order_reconciliation", "attempt": attempt,
+                           "next_check_seconds": delay, "retry_exhausted": retry_exhausted, **report}), flush=True)
+            if report.get("resolved") and reporter:
+                refresh("reconciliation")
+        if health:
+            health.update(status="authentication_required" if authentication_required else "running",
+                          reconciliation={"attempt": attempt, "next_check_seconds": delay,
+                                          "retry_exhausted": retry_exhausted, **report})
+
+    def schedule_reconciliation():
+        nonlocal reconciliation_required, reconciliation_attempts, next_reconciliation
+        reconciliation_required = True
+        reconciliation_attempts = 0
+        next_reconciliation = time.monotonic() + 10
+        if health:
+            health.update(reconciliation={"status": "pending", "attempt": 0,
+                "next_check_seconds": 10, "retry_exhausted": False})
     try:
         if runner.execute and isinstance(getattr(runner, "journal", None), Journal):
             try:
                 recovery = runner.recover_pending()
                 print(encoded({"event": "startup_recovery", **recovery}), flush=True)
                 if recovery["status"] == "reconciliation_required":
-                    reconciliation_required = stopped = True
+                    reconciliation_required = True
+                    stopped = stopped or not automatic_reconciliation
             except BrokerError as exc:
                 print(encoded({"event": "startup_recovery", "error_type": type(exc).__name__, "error": str(exc)}), flush=True)
                 if type(exc).__name__ == "AuthenticationError":
                     authentication_required = True
                 else:
                     reconciliation_required = True
-                stopped = True
+                stopped = stopped or authentication_required or not automatic_reconciliation
         if reporter:refresh("startup")
         if isinstance(getattr(runner,"journal",None),Journal) and runner.journal.unresolved(runner.scope):
-            reconciliation_required=stopped=True
+            reconciliation_required = True
+            stopped = stopped or not automatic_reconciliation
         if monitor and not stopped:
             monitor.start()
         if health:health.update(status="authentication_required" if authentication_required else "running")
+        if automatic_reconciliation and reconciliation_required:
+            schedule_reconciliation()
         next_monitor_health = 0.0
         while not stopped:
             if health and health.should_stop():break
+            if automatic_reconciliation and time.monotonic() >= next_reconciliation:
+                reconcile()
+                if stopped:break
             if monitor:
                 if monitor.failure is not None:
                     authentication_required = type(monitor.failure).__name__ == 'AuthenticationError'
@@ -190,7 +240,11 @@ def _consume(runner, config, max_messages=0):
                             time.sleep(post_delay)
                         refresh("post_action",result.get("id"))
                     if result.get("status")=="unknown":
-                        reconciliation_required=stopped=True
+                        if automatic_reconciliation:
+                            if not result.get("duplicate") or not reconciliation_required:
+                                schedule_reconciliation()
+                        else:
+                            reconciliation_required=stopped=True
                     processed += 1
                     if health:health.update(processed=processed,last_result={key:result.get(key) for key in
                         ("id","action","status","error_type","error","broker_error_code","http_status","submission_outcome")})

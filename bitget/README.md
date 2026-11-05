@@ -20,11 +20,11 @@ A deterministic `remark` (`cmd:` plus a command-ID hash) correlates submissions.
 
 Orders for a requested day combine `today-orders` and `history-orders`, deduplicate by exact ID and filter `submittedAt` to the configured day's UTC bounds. Historical `hasMore` splits the inclusive integer-second interval recursively. Live history responses may omit `hasMore` on empty or nonempty pages. With the flag absent, fewer than the documented 1000-order limit establishes a complete page; a full page triggers interval subdivision. An explicitly supplied flag must be boolean. A single second that cannot establish completeness, malformed pagination metadata, excessive windows, or rejected history range fails explicitly. Open-order cancellation queries history from Unix epoch through now as well as today's endpoint, preserving older GTC orders. Broker-side retention cannot be enlarged by this script; a server rejection is not silently replaced with a shorter range.
 
-Cancel-all discovers and validates the entire order list before sending cancellations. A failure during those reads rejects that command with `requests_sent:0` and `submission_outcome:not_submitted`, allowing the listener to continue. Authentication failures still stop intake. Once a cancellation write has an uncertain outcome, the listener still requires reconciliation and never retries it automatically. Existing journal entries marked unknown by older code remain blocked until reviewed; upgrading does not clear them or replay the original cancel-all command.
+Cancel-all discovers and validates the entire order list before sending cancellations. A failure during those reads rejects that command with `requests_sent:0` and `submission_outcome:not_submitted`, allowing the listener to continue. Authentication failures still stop intake. An uncertain cancellation starts automatic read-only reconciliation while the listener continues running. It never repeats the cancellation write or replays the original cancel-all command.
 
 `positions` reads every account channel from `stock-position` and includes only US stock symbols; snapshots retain the channel, signed share quantity and reported cost. Cancellation resolves an exact order detail, checks the requested symbol and stock instrument, and only then sends a cancel. The acknowledgement alone does not prove cancellation or fills.
 
-If a cancellation acknowledgement is incomplete or mismatched, the adapter reads the exact target order once. A verified terminal result resolves that target; an open order, failed read, or wrong identity remains unknown and stops intake for reconciliation. The cancellation write is never retried by this check.
+If a cancellation acknowledgement is incomplete or mismatched, the adapter reads the exact target order once. A verified terminal result resolves that target. If it is still unknown, the listener retries exact persisted order references three times with exponential waits of **10, 20, and 40 seconds** (approximately 10, 30, and 70 seconds after scheduling). Broker request time and other commands can extend these intervals. The same retry schedule runs after a restart, including unknown cancellations recorded by older versions. Terminal evidence is saved in the original journal and clears the block automatically. After three unsuccessful attempts, health reports `retry_exhausted:true` and retains the unresolved order for review; it does not terminate the listener. Snapshots, queries, cancellation controls, and Kafka polling continue during the waits and after exhaustion. New order submissions remain blocked while account operations are unresolved. Missing exact order references still require manual review. Reconciliation sends no order or cancellation writes; unattempted targets in a partial cancel-all remain explicitly recorded and are not automatically dispatched. Timed IOC/FOK tickets with a persisted order ID receive the same terminal checks and exact-ticket validation.
 
 The borrow control returns `supported:false`, `status:unavailable` and unknown quantity/rate/shortability. Stock+ supports ETB short selling, but its published API has no stock borrow-availability endpoint. Crypto loan APIs do not answer this query. Tradability reads security metadata and quote status; unknown statuses remain unknown.
 
@@ -182,8 +182,9 @@ systemctl stop bitget
 ```
 
 The service runs read-only Kafka, account, order, and instrument checks before
-starting the consumer. It does not automatically restart after an authentication
-or reconciliation failure and is not enabled at boot. The older
+starting the consumer. Pending order reconciliation keeps the listener running;
+authentication failures still stop it. Automatic service restart is disabled,
+and the service is not enabled at boot. The older
 `deploy/bitget-lyj.service` is a legacy unit name; stop that unit before replacing
 it with `bitget.service` on the same server. Use only one unit per local account.
 

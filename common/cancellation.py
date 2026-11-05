@@ -78,14 +78,17 @@ def _requests(broker, rows, send):
     results = []
     for row in rows:
         identity = row["order_id"]
+        target = {"order_id": identity}
+        if broker == "bitget" and row.get("symbol"):
+            target["symbol"] = row["symbol"]
         try:
             result = send(row)
-            results.append({"order_id": identity, "status": "no_action" if isinstance(result,dict) and (result.get("already_terminal") or result.get("cancel_requested") is False) else "cancel_requested", "raw": result})
+            results.append({**target, "status": "no_action" if isinstance(result,dict) and (result.get("already_terminal") or result.get("cancel_requested") is False) else "cancel_requested", "raw": result})
         except OutcomeUnknown as exc:
-            results.append({"order_id": identity, "status": "outcome_unknown", "error": str(exc)})
+            results.append({**target, "status": "outcome_unknown", "error": str(exc)})
             break
         except BrokerError as exc:
-            results.append({"order_id": identity, "status": "cancel_rejected", "error": str(exc)})
+            results.append({**target, "status": "cancel_rejected", "error": str(exc)})
             break
     response = _result(broker, results)
     response["not_requested_order_ids"] = [row["order_id"] for row in rows[len(results):]]

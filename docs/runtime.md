@@ -82,7 +82,7 @@ A crash/timeout after possible cancellation dispatch causes read-only recovery, 
 .venv/bin/python alpaca/recover_cancellations.py --config config.json --execute
 ```
 
-Live worker startup performs this recovery before intake. Durable terminal evidence also resolves an outer command left pending by a crash between the two journal commits. Unresolved account work blocks new submissions and stops the worker for reconciliation; reads and risk-reducing maintenance remain available through the CLI.
+Live worker startup performs this recovery before intake. Durable terminal evidence also resolves an outer command left pending by a crash between the two journal commits. Unresolved account work blocks new submissions. Bitget keeps its listener, snapshots, queries, and cancellation controls running while it reconciles exact persisted order references: three read-only attempts after exponential waits of 10, 20, and 40 seconds. Verified terminal status is recorded durably and automatically restores submission eligibility. After the third unsuccessful attempt, health reports `retry_exhausted:true`; the order stays pending for review and the listener continues running. No placement or cancellation write is repeated. Other brokers retain their stop-for-reconciliation behavior. Authentication failures still stop intake.
 
 ## Uncertain outcomes and credentials
 

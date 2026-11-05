@@ -79,6 +79,14 @@ class Runner:
                 return self._process(payload, message_id, kafka_timestamp_ms, require_account)
         return self._process(payload, message_id, kafka_timestamp_ms, require_account)
 
+    def reconcile_pending(self):
+        """Read exact Bitget order references and persist terminal evidence."""
+        if not self.execute or self.broker != "bitget" or not self.journal or not self.lock_path:
+            raise ConfigurationError("Automatic reconciliation requires a live Bitget journal")
+        from bitget.reconciliation import reconcile
+        with operation_lock(self.lock_path, timeout=float(self.config.get("lock_timeout_seconds", 30))):
+            return reconcile(self)
+
     def _process(self, payload, message_id=None, kafka_timestamp_ms=None, require_account=False):
         command = normalize(payload, self.broker, self.config, message_id, require_account)
         if command is None:
