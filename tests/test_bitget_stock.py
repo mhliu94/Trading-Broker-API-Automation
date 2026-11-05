@@ -96,7 +96,7 @@ def test_cancel_terminal_order_does_not_mutate():
 
 def test_cancel_ack_mismatch_remains_unknown():
     adapter = Adapter({})
-    adapter._request = Mock(side_effect=[row(), static(), {"orderId": "other"}])
+    adapter._request = Mock(side_effect=[row(), static(), {"orderId": "other"}, row()])
     with pytest.raises(OutcomeUnknown):
         adapter.cancel_stock_order("001")
 

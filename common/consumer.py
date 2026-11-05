@@ -161,7 +161,8 @@ def _consume(runner, config, max_messages=0):
                     if result.get("status")=="unknown":
                         reconciliation_required=stopped=True
                     processed += 1
-                    if health:health.update(processed=processed,last_result={key:result.get(key) for key in ("id","action","status","error_type")})
+                    if health:health.update(processed=processed,last_result={key:result.get(key) for key in
+                        ("id","action","status","error_type","error","broker_error_code","http_status","submission_outcome")})
                     if max_messages and processed >= max_messages:return
     finally:
         consumer.close()

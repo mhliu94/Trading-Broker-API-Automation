@@ -15,7 +15,7 @@ import time
 from urllib.parse import quote, urlencode
 
 from .cancellation import _send as send_confirmed_cancel, TS_CLOSED, LONG_CLOSED, TS_OPEN, LONG_OPEN
-from .errors import AuthenticationError, BrokerError, CommandError, ConfigurationError, OutcomeUnknown, UnsupportedOrder
+from .errors import AuthenticationError, BrokerError, CommandError, ConfigurationError, OutcomeUnknown, UnsupportedOrder, RequestRejected
 from .journal import encoded
 from .equity_scope import require_us_equity, us_stock_symbol
 
@@ -384,6 +384,12 @@ def execute(adapter, broker, command, journal, scope):
         record["submission"] = adapter.place_order(converted)
         record["order_id"] = _ack_reference(broker, record["submission"], plan, adapter)
     except Exception as exc:
+        if isinstance(exc, RequestRejected):
+            record["result"] = _result(record, "rejected", terminal_confirmed=False,
+                submission_outcome="not_submitted", requests_sent=exc.requests_sent,
+                broker_error_code=exc.code, http_status=exc.http_status, message=str(exc))
+            _save(journal, scope, record, "complete")
+            raise
         if isinstance(exc, AuthenticationError):
             record["authentication_error"] = True
             if exc.no_submission:

@@ -16,14 +16,22 @@ import math
 import re
 import time
 from urllib.parse import urlencode, urlsplit
+from zoneinfo import ZoneInfo
 
-from common.errors import AuthenticationError, BrokerError, CommandError, ConfigurationError, UnsupportedOrder, OutcomeUnknown
+from common.errors import AuthenticationError, BrokerError, CommandError, ConfigurationError, UnsupportedOrder, OutcomeUnknown, RequestRejected
 from common.utils import decimal_string, iso_utc, parse_time
 from common.equity_scope import require_us_equity, us_stock_symbol
 
 AUTH_ERROR_CODES = {"40001", "40002", "40003", "40006", "40009", "40011", "40012",
                     "40014", "40018", "40025", "40030", "40036", "40037", "40038",
                     "40039", "40040", "40041", "40065", "40084"}
+# Bitget explicitly requires reconciliation for these errors, even if HTTP 400.
+UNCERTAIN_ERROR_CODES = {"40010", "40725", "45001", "25000", "25001"}
+REJECTION_CODES = {"429", "25002", "25004", "25012", "25013", "25100", "25101", "25102", "25104", "25105",
+                   "25200", "25201", "25202", "25203", "25204", "25205", "25206", "25207", "25208", "25209",
+                   "25210", "25211", "25213", "25214", "25215", "25216", "25225", "25226", "25227", "25229", "25230",
+                   "40017", "40019", "40020", "40034", "40053", "40057", "40058", "40059", "40064", "40102",
+                   "40500", "40706", "40721", "40724", "40754", "40755", "40757", "40761", "40762"}
 PREFIX = "/api/v3/stockplus"
 HISTORY_PAGE_LIMIT = 1000
 TERMINAL = {"Filled", "Rejected", "Canceled", "Expired", "PartialWithdrawal"}
@@ -48,6 +56,10 @@ class Adapter:
         except UnsupportedOrder as exc:
             raise ConfigurationError("Bitget adapter supports US stocks only") from exc
         self._trade_times = deque()
+        try:
+            self._session_name(self.config.get("default_outside_rth", "AnyTime"))
+        except UnsupportedOrder as exc:
+            raise ConfigurationError("Bitget default_outside_rth must be Auto, RTHOnly, AnyTime or Overnight") from exc
         if self.config.get("borrow_scope", "none") != "none" or self.config.get("borrow_coin_map"):
             raise ConfigurationError("Crypto borrow settings cannot be used for Stock+ US stocks")
 
@@ -66,6 +78,22 @@ class Adapter:
     def correlation(command_id) -> str:
         return "cmd:" + hashlib.sha256(str(command_id).encode()).hexdigest()[:60]
 
+    @staticmethod
+    def _session_name(value):
+        if not isinstance(value, str):
+            raise UnsupportedOrder("Invalid Stock+ outside_rth")
+        value = {"AUTO": "Auto", "RTH_ONLY": "RTHOnly", "ANY_TIME": "AnyTime",
+                 "OVERNIGHT": "Overnight"}.get(value, value)
+        if value not in {"Auto", "RTHOnly", "AnyTime", "Overnight"}:
+            raise UnsupportedOrder("Invalid Stock+ outside_rth")
+        return value
+
+    @staticmethod
+    def _automatic_session():
+        # This selects a session, not symbol eligibility or a market-open state.
+        hour = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York")).hour
+        return "Overnight" if hour >= 20 or hour < 4 else "AnyTime"
+
     def build_order(self, command: dict) -> dict:
         require_us_equity(command, self.config)
         options = command.get("options") or {}
@@ -78,19 +106,22 @@ class Adapter:
             raise UnsupportedOrder("Bitget Stock+ requires buy/sell and market/limit")
         if tif not in {"day", "gtc", "gtd"}:
             raise UnsupportedOrder("Bitget Stock+ supports DAY/GTC/GTD; native FOK and IOC are not documented")
-        outside = options.get("outside_rth", "RTHOnly" if command.get("auction_intent") else "AnyTime")
-        outside = {"RTH_ONLY": "RTHOnly", "ANY_TIME": "AnyTime", "OVERNIGHT": "Overnight"}.get(outside, outside)
+        default_session = self._session_name(self.config.get("default_outside_rth", "AnyTime"))
+        outside = self._session_name(options.get("outside_rth", "RTHOnly" if command.get("auction_intent") else default_session))
         if "extended_hours" in options:
             if type(options["extended_hours"]) is not bool:
                 raise UnsupportedOrder("extended_hours must be boolean")
-            mapped = "AnyTime" if options["extended_hours"] else "RTHOnly"
-            if "outside_rth" in options and outside != mapped:
-                raise UnsupportedOrder("Conflicting outside_rth and extended_hours options")
-            outside = mapped
-        if outside not in {"RTHOnly", "AnyTime", "Overnight"}:
-            raise UnsupportedOrder("Invalid Stock+ outside_rth")
+            if "outside_rth" in options:
+                if (outside == "RTHOnly") == options["extended_hours"]:
+                    raise UnsupportedOrder("Conflicting outside_rth and extended_hours options")
+            else:
+                outside = ("Auto" if default_session == "Auto" else "AnyTime") if options["extended_hours"] else "RTHOnly"
         if command.get("auction_intent") and outside != "RTHOnly":
             raise UnsupportedOrder("LULD intent requires regular trading hours")
+        if outside == "Auto":
+            outside = self._automatic_session()
+        if outside == "Overnight" and kind == "market":
+            raise UnsupportedOrder("Overnight trading requires a limit order in this adapter; use LIMIT_ORDER with an explicit limit_price")
         order = {"symbol": self.stock_symbol(command.get("symbol")), "side": "Buy" if side == "buy" else "Sell",
                  "orderType": "MO" if kind == "market" else "LO",
                  "submittedQuantity": self._positive(command.get("quantity"), "quantity"),
@@ -124,6 +155,43 @@ class Adapter:
                 "Bitget rejected account mode (code 40084): this key belongs to a Classic Account; "
                 "the requested API requires Unified Account access", no_submission=True)
         return AuthenticationError(f"Bitget rejected API credentials/access (code {code})", no_submission=True)
+
+    def _response_error(self, status, result):
+        """Classify broker evidence; an HTTP client error alone is insufficient."""
+        raw_code = result.get("code") if isinstance(result, dict) else None
+        code = str(raw_code) if isinstance(raw_code, (str, int)) and not isinstance(raw_code, bool) else None
+        if code is not None and not re.fullmatch(r"[0-9]{3,6}", code):
+            code = None
+        raw_message = result.get("msg", result.get("message")) if isinstance(result, dict) else None
+        message = raw_message if isinstance(raw_message, str) else "Broker response has no error message"
+        for key in ("api_key", "api_secret", "passphrase"):
+            secret = self.config.get(key)
+            if isinstance(secret, str) and secret:
+                message = message.replace(secret, "[redacted]")
+        message = " ".join(message.split())[:1000]
+        description = f"Bitget HTTP {status}, code {code or 'unavailable'}: {message}"
+        # Server/timeout/unknown outcomes override apparent client-side failure.
+        if status >= 500 or status < 200 or 300 <= status < 400 or code in UNCERTAIN_ERROR_CODES:
+            return OutcomeUnknown(description)
+        data = result.get("data") if isinstance(result, dict) else None
+        def reference(value):
+            if isinstance(value, dict):
+                return any(value.get(k) not in (None, "", 0) for k in ("orderId", "order_id")) or any(reference(v) for v in value.values())
+            return isinstance(value, list) and any(reference(v) for v in value)
+        if reference(data):
+            return OutcomeUnknown(description)
+        if status in {401, 403}:
+            return AuthenticationError(description, no_submission=True)
+        if code in AUTH_ERROR_CODES:
+            return self._access_error(code)
+        if code in {None, "00000", "0", "25212"}:
+            return OutcomeUnknown(description)
+        if re.search(r"timed?\s*out|timeout|unknown\s+error|internal\s+(?:server\s+)?error|system\s+error|service\s+(?:return\s+an\s+)?error", message, re.I):
+            return OutcomeUnknown(description)
+        if code in REJECTION_CODES or (status in {400, 404, 405, 415, 422, 429}
+                                      and isinstance(raw_message, str) and bool(raw_message.strip())):
+            return RequestRejected(description, code=code, http_status=status)
+        return OutcomeUnknown(description)
 
     def _request(self, method: str, path: str, params=None, payload=None):
         import requests
@@ -164,28 +232,12 @@ class Adapter:
             )
         except requests.RequestException as exc:
             raise OutcomeUnknown("Bitget request failed; an order submission may have succeeded. Reconcile before retrying.") from exc
-        if response.status_code in (401, 403):
-            raise AuthenticationError(f"Bitget denied authentication or access (HTTP {response.status_code})", no_submission=True)
-        if not 200 <= response.status_code < 300:
-            if response.status_code == 400:
-                try:
-                    error_body = response.json()
-                except ValueError:
-                    error_body = None
-                if isinstance(error_body, dict) and str(error_body.get("code")) in AUTH_ERROR_CODES:
-                    raise self._access_error(error_body["code"])
-            error = OutcomeUnknown if response.status_code >= 500 else BrokerError
-            raise error(f"Bitget returned HTTP {response.status_code}; reconcile any unconfirmed order")
         try:
             result = response.json()
-        except ValueError as exc:
-            raise OutcomeUnknown("Bitget returned invalid JSON; reconcile any unconfirmed order") from exc
-        if isinstance(result, dict) and str(result.get("code")) in AUTH_ERROR_CODES:
-            raise self._access_error(result["code"])
-        if not isinstance(result, dict) or str(result.get("code")) != "00000":
-            code = result.get("code", "unknown") if isinstance(result, dict) else "invalid_response"
-            message = result.get("msg", result.get("message", "")) if isinstance(result, dict) else ""
-            raise BrokerError(f"Bitget error {code}: {message}")
+        except ValueError:
+            result = None
+        if not 200 <= response.status_code < 300 or not isinstance(result, dict) or str(result.get("code")) != "00000":
+            raise self._response_error(response.status_code, result)
         if "data" not in result:
             raise BrokerError("Bitget response omitted data")
         return result["data"]
@@ -242,8 +294,14 @@ class Adapter:
 
     def place_order(self, command: dict):
         payload = self.build_order(command)
-        if self._stock_instrument(payload["symbol"]) is None:
-            raise UnsupportedOrder("Stock+ did not return the requested US stock instrument")
+        try:
+            if self._stock_instrument(payload["symbol"]) is None:
+                raise UnsupportedOrder("Stock+ did not return the requested US stock instrument")
+        except AuthenticationError:
+            raise
+        except BrokerError as exc:
+            raise RequestRejected(str(exc), code=getattr(exc, "code", None),
+                                  http_status=getattr(exc, "http_status", None), requests_sent=0) from exc
         result = self._request("POST", PREFIX + "/trade/place-order", payload=payload)
         if not isinstance(result, dict) or not isinstance(result.get("orderId"), str) or not result["orderId"]:
             raise OutcomeUnknown("Stock+ placement response omitted orderId; reconcile before retrying")
@@ -365,6 +423,16 @@ class Adapter:
         result = self._request("POST", PREFIX + "/trade/cancel-order",
                                payload={"symbol": row["symbol"], "orderId": row["orderId"]})
         if not isinstance(result, dict) or result.get("orderId") != row["orderId"] or result.get("symbol") not in (None, row["symbol"]):
+            # A read can prove the exact target is terminal even when the live
+            # acknowledgement is incomplete. Never retry the cancellation.
+            try:
+                observed = self.stock_order_detail(row["orderId"])
+            except BrokerError:
+                observed = None
+            if observed is not None and observed["status"] in TERMINAL and observed["symbol"] == row["symbol"]:
+                return {"orderId": observed["orderId"], "symbol": observed["symbol"], "status": observed["status"],
+                        "already_terminal": True, "cancel_requested": False, "terminal_confirmed": True,
+                        "acknowledgement_verified": False}
             raise OutcomeUnknown("Stock+ cancellation acknowledgement identity mismatch; query order detail")
         return result
 
@@ -406,6 +474,11 @@ class Adapter:
                 "luld_auction_participation": "unverified; no dedicated auction route is documented",
                 "borrow_availability": "No documented Stock+ stock borrow availability endpoint",
                 "tradability_scope": "US stock listing and quote status; account permission is separate",
+                "outside_rth": ["Auto", "RTHOnly", "AnyTime", "Overnight"],
+                "default_outside_rth": self.config.get("default_outside_rth", "AnyTime"),
+                "automatic_session_timezone": "America/New_York",
+                "automatic_overnight_hours": "20:00-04:00 America/New_York; broker eligibility applies",
+                "overnight_order_types": ["limit"],
                 "server_idempotency": False, "client_correlation": "remark (correlation only)",
                 "sources": ["https://www.bitget.com/docs/catalog/stock-plus/orders",
                             "https://www.bitget.com/docs/catalog/stock-plus/assets",

@@ -9,7 +9,7 @@ import pytest
 
 from bitget.adapter import Adapter, PREFIX
 from common.commands import normalize
-from common.errors import BrokerError, ConfigurationError, OutcomeUnknown, UnsupportedOrder
+from common.errors import BrokerError, ConfigurationError, OutcomeUnknown, UnsupportedOrder, RequestRejected
 
 
 def command(**changes):
@@ -105,6 +105,11 @@ def test_signed_post_preserves_order_type_and_session_after_normalization(kind, 
         payload = command(order_type=kind, options=options)
         if kind == "market":
             del payload["limit_price"]
+        if kind == "market" and expected == "Overnight":
+            with pytest.raises(UnsupportedOrder, match="Overnight trading requires a limit order"):
+                adapter.place_order(normalize(payload, "bitget", {}))
+            request.assert_not_called()
+            return
         adapter.place_order(normalize(payload, "bitget", {}))
     assert request.call_count == 2
     args, kwargs = request.call_args
@@ -178,8 +183,9 @@ def test_instrument_preflight_rejects_missing_or_nonstock_before_write():
     for data in ({"list": []}, {"list": [{"symbol": "AAPL.US", "currency": "USD", "board": "USOption"}]}):
         adapter = Adapter({})
         adapter._request = Mock(return_value=data)
-        with pytest.raises(UnsupportedOrder):
+        with pytest.raises(RequestRejected) as error:
             adapter.place_order(command())
+        assert error.value.requests_sent == 0
         assert adapter._request.call_count == 1
         assert adapter._request.call_args.args[0] == "GET"
 

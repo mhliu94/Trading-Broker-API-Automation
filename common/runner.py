@@ -4,7 +4,7 @@ import math
 import time
 from pathlib import Path
 from .commands import normalize, validate_age
-from .errors import AuthenticationError, BrokerError, CancellationDiscoveryError, CommandError, ConfigurationError, OutcomeUnknown
+from .errors import AuthenticationError, BrokerError, CancellationDiscoveryError, CommandError, ConfigurationError, OutcomeUnknown, RequestRejected
 from .journal import Journal
 from .locking import operation_lock
 from .registry import adapter_for
@@ -65,6 +65,9 @@ class Runner:
                     self.journal.reconcile(self.scope, command_id, "found",
                         "Durable timed-cancellation record contains exact broker terminal-state confirmation",
                         record["order_id"])
+                elif outcome.get("submission_outcome") == "not_submitted" and not record.get("order_id"):
+                    self.journal.reconcile(self.scope, command_id, "not_submitted",
+                        "Durable timed workflow contains verified request rejection before acceptance; " + str(outcome.get("message", "")))
             outstanding = self.unresolved_timed()
             return {"status": "reconciliation_required" if outstanding else "ok",
                     "broker": self.broker, "results": results, "unresolved": outstanding,
@@ -206,6 +209,9 @@ class Runner:
                       "error": str(exc) if isinstance(exc, BrokerError) else "Broker operation failed; inspect local configuration and reconcile before retrying"}
             if isinstance(exc, CancellationDiscoveryError):
                 result.update(submission_outcome="not_submitted", requests_sent=0)
+            if isinstance(exc, RequestRejected) and mutation:
+                result.update(status="rejected", submission_outcome="not_submitted", requests_sent=exc.requests_sent,
+                              broker_error_code=exc.code, http_status=exc.http_status)
             if isinstance(exc,AuthenticationError):
                 result["status"]="authentication_required"
                 if action=="place_order" and exc.no_submission and self.journal:

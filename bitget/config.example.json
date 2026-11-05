@@ -5,6 +5,7 @@
   "account_type": "stock_plus",
   "asset_class": "us_equity",
   "timezone": "America/New_York",
+  "default_outside_rth": "Auto",
   "fok_policy": "native",
   "action_delay_seconds": 5,
   "lock_timeout_seconds": 30,

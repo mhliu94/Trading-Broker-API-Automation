@@ -34,5 +34,19 @@ class OutcomeUnknown(BrokerError):
     """An order may have reached the broker; reconcile before taking further action."""
 
 
+class RequestRejected(BrokerError):
+    """Positive evidence that this request did not accept a trading operation.
+
+    Only adapters that can establish rejection may raise this. Timeouts,
+    internal errors, contradictory responses and decoding failures do not qualify.
+    The failed command stays cached and must never be automatically replayed.
+    """
+    def __init__(self, message, *, code=None, http_status=None, requests_sent=1):
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
+        self.requests_sent = requests_sent
+
+
 class CancellationDiscoveryError(BrokerError):
     """Open-order discovery failed before any cancellation write was attempted."""
