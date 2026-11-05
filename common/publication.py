@@ -159,7 +159,8 @@ class SnapshotPublisher:
     publish the account snapshot. Account snapshots have no order sequence.
     """
     def __init__(self, path, routing, producer, account_topic="account-details",
-                 order_topic="order-status", timeout=30, allow_prior_orders=False):
+                 order_topic="order-status", timeout=30, allow_prior_orders=False,
+                 republish_on_restart=True):
         self.path = Path(path).expanduser()
         self.account = _identifier(routing.get("account_id"), "account_id", 128)
         self.account_num_id = routing.get("account_num_id")
@@ -183,6 +184,7 @@ class SnapshotPublisher:
         self._seen = set()
         self._thread_lock = threading.RLock()
         self.allow_prior_orders = allow_prior_orders
+        self.republish_on_restart = republish_on_restart
         self.delivery_observer = None
 
     def known_orders(self):
@@ -328,8 +330,9 @@ class SnapshotPublisher:
         Returns delivered/failed/skipped counts and per-order errors. Delivery
         failures retain the exact pending payload and sequence. Snapshots from
         prior/future calendar dates are retained in the DB if pending but never
-        sent. Unchanged orders are republished once per publisher process when
-        observed after restart. Updated observation times alone are suppressed.
+        sent unless allow_prior_orders is enabled. Unchanged orders are
+        republished once after restart only when republish_on_restart is true.
+        Updated observation times alone are suppressed.
         """
         current = datetime.now(timezone.utc) if now is None else now
         if not isinstance(current, datetime) or current.utcoffset() is None:
@@ -389,7 +392,7 @@ class SnapshotPublisher:
                     if previous is not None and previous["created_at"] != snapshot["created_at"]:
                         raise PublicationError("Order created_at changed for an existing order_id")
                     changed = previous is None or _state(previous) != _state(snapshot)
-                    if not changed and identifier in self._seen:
+                    if not changed and (not self.republish_on_restart or identifier in self._seen):
                         result["skipped"] += 1
                         continue
                     if changed:

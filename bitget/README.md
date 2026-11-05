@@ -40,20 +40,43 @@ Official sources checked 2026-10-25: [Stock+ orders](https://www.bitget.com/docs
 
 ## Order monitoring and latency statistics
 
-Set `brokers.bitget.monitor.enabled:true` with `kafka.publish_snapshots:true` to
-run independent order, account, and reconciliation workers. Configure the stable
+Live Bitget configurations default to `monitor.enabled:true` and
+`monitor.poll_seconds:1.2`, including older configurations without a monitor
+section. Both example configurations enable it. With `kafka.publish_snapshots:true`,
+this runs independent order, account, and reconciliation workers. Configure the stable
 `journal_account` first. This replaces the shared 30-second snapshot loop for
 Bitget. The post-action snapshot sleep does not run in this mode. Existing order
 execution policy, including `action_delay_seconds`, remains in force; monitoring
 continues during command execution.
 
-The default REST schedule is 1.2 seconds between order-query starts. After a
+The default REST schedule is **1,200 ms** between order-query starts. The frequent
+`today-orders` requests pass repeated `status` filters for every nonterminal
+Stock+ state, including partial fills and pending cancellations/replacements.
+Previously active orders missing from that response are queried by their exact
+order ID until a terminal state is confirmed, then removed from detail polling.
+The monitor restores tracked orders from the durable publication journal on restart.
+
+The Stock+ gateway signs only the first value of a repeated `status` parameter,
+while the query applies all supplied statuses. Signing every repeated value
+returned `40009` in read-only live checks; the adapter uses the observed gateway
+convention only for the two order-list GET endpoints. Other signatures are unchanged.
+
+Kafka `order-status` receives new orders and meaningful changes only; timestamp-only
+changes and unchanged observations after restart are suppressed. Each message
+contains the full changed order snapshot. Failed/unacknowledged deliveries still
+retry from the durable outbox, so consumers must tolerate duplicate delivery.
+
+After a
 command completes, the monitor wakes immediately and requests a 250 ms cadence
 for up to two seconds, subject to the quota and request duration. Cash and
 positions refresh independently every five seconds, immediately after an order
 change subject to a one-second minimum spacing, then once per second for three
-seconds. History reconciliation runs every 60 seconds; discovery of older active
-orders runs every 300 seconds. Missing active orders are queried individually,
+seconds. A broader today/history reconciliation runs every 60 seconds to catch
+orders that were created and completed between polls, including manual orders.
+History sweeps overlap across midnight. Discovery of older active orders uses
+the same nonterminal status filters every 300 seconds. These slower checks and
+startup preflight can include terminal orders; the frequent polling loop filters
+for active orders. Missing active orders are queried individually,
 including GTC orders created on earlier days. Only broker observations establish
 fills/cancellations; disappearance or an acknowledgement never establishes them.
 

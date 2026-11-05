@@ -19,7 +19,7 @@
     2
   ],
   "monitor": {
-    "enabled": false,
+    "enabled": true,
     "poll_seconds": 1.2,
     "burst_poll_seconds": 0.25,
     "burst_seconds": 2,

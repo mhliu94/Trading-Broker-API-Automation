@@ -83,6 +83,8 @@ def _consume(runner, config, max_messages=0):
         publication_path = settings.get("publication_journal") or str(runner.journal_path.with_suffix(".publication.sqlite3"))
         publisher = SnapshotPublisher(publication_path,{**routing,"timezone":runner.config.get("timezone","America/New_York")},producer,
                                       account_topic=account_topic,order_topic=order_topic)
+        if runner.broker == 'bitget':
+            publisher.republish_on_restart = False
         if monitor_enabled:
             from bitget.monitor import StockMonitor
             publisher.allow_prior_orders = True

@@ -20,6 +20,7 @@ from common.publication import validate_order_snapshot
 from common.utils import parse_time, today_window
 from .rate_limit import MonitorStopped
 from .telemetry import LatencyLog
+from .adapter import ACTIVE
 
 
 CLOSED = {'FILLED', 'CANCELED', 'REJECTED', 'EXPIRED'}
@@ -33,6 +34,7 @@ def fingerprint(snapshot):
 class StockMonitor:
     def __init__(self, runner, publisher):
         self.runner, self.adapter, self.publisher = runner, runner.adapter, publisher
+        self.publisher.republish_on_restart = False
         self.settings = runner.config.get('monitor', {})
         self.poll_seconds = self._seconds('poll_seconds', 1.2, .02, 30)
         self.burst_seconds = self._seconds('burst_seconds', 2, 0, 5)
@@ -80,6 +82,7 @@ class StockMonitor:
         self.publisher.delivery_observer = self._delivered
         self.adapter.request_observer = self.log.emit
         self.log.emit('monitor_started', transport='rest', poll_seconds=self.poll_seconds,
+                      active_orders_only=True, publication='changes_only',
                       burst_poll_seconds=self.burst_poll_seconds, burst_seconds=self.burst_seconds,
                       command_reserve=self.adapter._limiter.reserve,
                       sustained_subsecond_guaranteed=False, restored_orders=len(self.known))
@@ -154,6 +157,8 @@ class StockMonitor:
                                                      **self.routing, 'schema_version': 1})
                 identity = snapshot['order_id']
                 previous = self.known.get(identity)
+                if previous is not None and previous['symbol'] != snapshot['symbol']:
+                    raise BrokerError('Order identity changed symbol during monitoring')
                 broker_time = parse_time(raw['updatedAt']) if raw.get('updatedAt') else None
                 if observed_mono < self.last_seen.get(identity, 0):
                     continue
@@ -247,6 +252,8 @@ class StockMonitor:
             try:
                 with self.lock:
                     identity = self.priority.popleft() if self.priority else None
+                    while identity and self.known.get(identity, {}).get('status') in CLOSED:
+                        identity = self.priority.popleft() if self.priority else None
                 missing = sorted(k for k, v in self.known.items() if v['status'] not in CLOSED and k not in today_ids)
                 if identity is None and missing and self.detail_turn:
                     identity = missing[self.detail_cursor % len(missing)]
@@ -256,7 +263,7 @@ class StockMonitor:
                     rows = [self.adapter.stock_order_detail(identity)]
                     source = 'detail'
                 else:
-                    rows = self.adapter._today()
+                    rows = self.adapter._today(statuses=ACTIVE)
                     today_ids = {r.get('orderId') for r in rows}
                     source = 'today'
                 observed_at, observed_mono = datetime.now(timezone.utc), time.monotonic()
@@ -345,15 +352,24 @@ class StockMonitor:
 
     def _reconcile(self):
         next_discovery = 0.0
+        # Overlap the previous sweep across midnight. A quick order can reach
+        # terminal state between active polls and must still be published.
+        history_start = today_window(self.runner.config.get('timezone', 'America/New_York'))[0]
         while not self.stop_event.is_set():
             try:
                 if time.monotonic() >= next_discovery:
-                    rows = self.adapter.open_stock_orders()
+                    rows = self.adapter._history(0, int(time.time()), statuses=ACTIVE)
                     source = 'discovery'
                     next_discovery = time.monotonic() + self.discovery_seconds
                 else:
                     start, end = today_window(self.runner.config.get('timezone', 'America/New_York'))
-                    rows = self.adapter._history(math.floor(start.timestamp()), math.ceil(end.timestamp()) - 1)
+                    # Today's endpoint catches fast completions too; history
+                    # covers the preceding day when a sweep crosses midnight.
+                    rows = self.adapter._merge_orders(
+                        self.adapter._today(),
+                        self.adapter._history(math.floor(min(start, history_start).timestamp()),
+                                              math.ceil(end.timestamp()) - 1))
+                    history_start = start
                     source = 'history'
                 batch = (rows, source, datetime.now(timezone.utc), time.monotonic())
                 while not self.stop_event.is_set():

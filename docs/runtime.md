@@ -34,10 +34,14 @@ For direct broker adapters, cancel-all discovery finishes before any cancellatio
 
 With `kafka.publish_snapshots:true` (the live default), startup and periodic refreshes publish account snapshots to `account-details` and full order snapshots to `order-status`. The example interval is 30 seconds, scheduled from completion of the previous refresh attempt. After an order/cancellation, the worker commits the processed input and waits two seconds before refreshing; reporting failure never resubmits that financial command. Persistent trading controls and explicit account/order queries also refresh reporting.
 
-Bitget can opt into independent monitoring with `brokers.bitget.monitor.enabled`.
-This replaces its periodic/post-action snapshot loop with order, account, and
+Bitget enables independent monitoring by default at a 1,200 ms interval; an explicit
+`brokers.bitget.monitor.enabled:false` opts into the legacy snapshot loop.
+The default replaces its periodic/post-action snapshot loop with order, account, and
 reconciliation workers, a shared Stock+ request budget, and JSON latency logs.
-Order updates are published promptly without waiting for account queries. See
+Frequent polls request nonterminal orders, with exact-ID checks to confirm final
+states and slower broad reconciliation to catch orders completed between polls.
+Order updates are published only when new or changed, including across restarts,
+without waiting for account queries. Failed Kafka deliveries still retry. See
 [Bitget monitoring](../bitget/README.md#order-monitoring-and-latency-statistics)
 for defaults, quota limits, latency definitions, and the statistics command.
 
@@ -45,7 +49,7 @@ Output topics must already exist. The worker verifies them before sending; it do
 
 Order snapshots follow KTrader v1: exact string broker IDs, immutable creation times, cumulative fills, distinct lifecycle states, and actual average execution prices. Broker acknowledgement is never treated as a fill. External/manual orders and today's completed orders are included. One record's mapping failure does not discard valid siblings; broker-wide read failures remain explicit. Multi-leg orders that cannot be represented by the single-symbol schema are reported as mapping errors while the raw `orders_today.py` query remains available.
 
-Order delivery uses a separate SQLite outbox. It saves the full payload and sequence before sending, acknowledges only confirmed Kafka deliveries, and retries an identical pending payload after failure/restart. Unchanged observations do not increment sequence. Unchanged orders are republished once after process restart when seen again. Today's pending messages retry even if absent from a new broker response. This follows GigaMoney's current-day policy: prior/future-date pending records are retained for inspection but not replayed. It does not infer that disappearing orders were canceled.
+Order delivery uses a separate SQLite outbox. It saves the full payload and sequence before sending, acknowledges only confirmed Kafka deliveries, and retries an identical pending payload after failure/restart. Unchanged observations do not increment sequence. Bitget suppresses unchanged orders across restarts; other brokers republish them once when seen again. Today's pending messages retry even if absent from a new broker response. This follows GigaMoney's current-day policy: prior/future-date pending records are retained for inspection but not replayed. It does not infer that disappearing orders were canceled.
 
 The reference account consumer requires numeric cash. Account mappings preserve broker meaning:
 

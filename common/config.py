@@ -35,4 +35,15 @@ def load_config(path, broker, execute=False):
     selected = resolve_env(data["brokers"][broker], strict=execute)
     if not isinstance(selected, dict):
         raise ConfigurationError("Broker configuration must be an object")
+    if broker == "bitget" and execute:
+        # Live CLI/service entry points share this default, including older
+        # private configs that predate the independent monitor.
+        monitor = selected.setdefault("monitor", {})
+        if not isinstance(monitor, dict):
+            raise ConfigurationError("Bitget monitor must be an object")
+        monitor.setdefault("enabled", True)
+        monitor.setdefault("poll_seconds", 1.2)
+    elif broker == "bitget" and isinstance(selected.get("monitor"), dict):
+        # Offline previews do not start workers or need an account quota file.
+        selected["monitor"]["enabled"] = False
     return data, selected

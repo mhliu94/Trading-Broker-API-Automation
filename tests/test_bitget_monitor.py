@@ -282,7 +282,7 @@ def test_slow_account_read_does_not_block_order_worker_and_shutdown_joins(monito
         return {'cash': 1, 'positions': []}
     monitor.adapter.snapshot_account = account
     monitor.adapter._today = Mock(return_value=[initial])
-    monitor.adapter.open_stock_orders = Mock(return_value=[])
+    monitor.adapter._history = Mock(return_value=[])
     actual_send = monitor.publisher.producer.send
     def send(topic, **kwargs):
         if topic == 'order-status':

@@ -284,7 +284,17 @@ class Adapter:
                 while self._trade_times and now - self._trade_times[0] >= 30:
                     self._trade_times.popleft()
             self._trade_times.append(now)
+        signing_path = path
         if params:
+            signing_params = params
+            if (method.upper() == "GET" and path in {
+                    PREFIX + "/trade/today-orders", PREFIX + "/trade/history-orders"}
+                    and isinstance(params.get("status"), (list, tuple)) and params["status"]):
+                # Stock+ authenticates the first repeated status value, while
+                # its order query uses all values. Signing the full repeated
+                # query returns 40009 (verified against both endpoints).
+                signing_params = {**params, "status": params["status"][0]}
+            signing_path += "?" + urlencode(signing_params, doseq=True)
             path += "?" + urlencode(params, doseq=True)
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True) if payload is not None else ""
         timestamp = str(time.time_ns() // 1_000_000)
@@ -292,7 +302,7 @@ class Adapter:
             "ACCESS-KEY": self.config["api_key"],
             "ACCESS-PASSPHRASE": self.config["passphrase"],
             "ACCESS-TIMESTAMP": timestamp,
-            "ACCESS-SIGN": self.signature(self.config["api_secret"], timestamp, method, path, body),
+            "ACCESS-SIGN": self.signature(self.config["api_secret"], timestamp, method, signing_path, body),
             "Content-Type": "application/json",
             "locale": "en-US",
         }
@@ -407,13 +417,16 @@ class Adapter:
                     output.append({**row, "accountChannel": identity})
         return output
 
-    def _today(self):
-        data = self._request("GET", PREFIX + "/trade/today-orders", {"market": "US"})
+    def _today(self, statuses=None):
+        params = {"market": "US"}
+        if statuses is not None:
+            params["status"] = sorted(statuses)
+        data = self._request("GET", PREFIX + "/trade/today-orders", params)
         if isinstance(data, dict) and data.get("hasMore") not in (None, False):
             raise BrokerError("Stock+ today-orders unexpectedly reports truncation")
         return self._list(data, "orders")
 
-    def _history(self, start_seconds, end_seconds):
+    def _history(self, start_seconds, end_seconds, statuses=None):
         """Inclusive integer-second windows; split hasMore, never drop a boundary."""
         if end_seconds < start_seconds:
             return []
@@ -425,8 +438,10 @@ class Adapter:
             calls += 1
             if calls > 10000:
                 raise BrokerError("Stock+ history query exceeds 10000 windows; result is incomplete")
-            data = self._request("GET", PREFIX + "/trade/history-orders",
-                                 {"market": "US", "startAt": low, "endAt": high})
+            params = {"market": "US", "startAt": low, "endAt": high}
+            if statuses is not None:
+                params["status"] = sorted(statuses)
+            data = self._request("GET", PREFIX + "/trade/history-orders", params)
             rows = self._list(data, "orders")
             # Live Stock+ omits hasMore on nonempty pages too. Its documented
             # cap is 1000 orders: a shorter page is complete, but a full page
