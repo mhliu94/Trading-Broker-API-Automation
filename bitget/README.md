@@ -38,6 +38,76 @@ Response semantics: [Bitget REST conventions](https://www.bitget.com/docs/uta/re
 
 Official sources checked 2026-10-25: [Stock+ orders](https://www.bitget.com/docs/catalog/stock-plus/orders), [Stock+ assets](https://www.bitget.com/docs/catalog/stock-plus/assets), [Stock+ instrument/quotes](https://www.bitget.com/docs/catalog/stock-plus/stock-quotes), [REST authentication](https://www.bitget.com/docs/uta/rest-api), [stock short-selling announcement](https://www.bitget.com/support/articles/12560603892050).
 
+## Order monitoring and latency statistics
+
+Set `brokers.bitget.monitor.enabled:true` with `kafka.publish_snapshots:true` to
+run independent order, account, and reconciliation workers. Configure the stable
+`journal_account` first. This replaces the shared 30-second snapshot loop for
+Bitget. The post-action snapshot sleep does not run in this mode. Existing order
+execution policy, including `action_delay_seconds`, remains in force; monitoring
+continues during command execution.
+
+The default REST schedule is 1.2 seconds between order-query starts. After a
+command completes, the monitor wakes immediately and requests a 250 ms cadence
+for up to two seconds, subject to the quota and request duration. Cash and
+positions refresh independently every five seconds, immediately after an order
+change subject to a one-second minimum spacing, then once per second for three
+seconds. History reconciliation runs every 60 seconds; discovery of older active
+orders runs every 300 seconds. Missing active orders are queried individually,
+including GTC orders created on earlier days. Only broker observations establish
+fills/cancellations; disappearance or an acknowledgement never establishes them.
+
+Stock+ order-query endpoints advertise 30 calls/30 seconds/UID and a 20 ms
+minimum spacing (checked 2026-11-05). All trade calls in this implementation share
+that conservative budget. Monitoring leaves five slots for command requests;
+history queries briefly defer to live polls without indefinite starvation. The quota file coordinates local processes
+using the same account label and survives process restarts. Other hosts or clients
+can still consume the broker's UID quota. HTTP 429 responses establish a shared
+cooldown; no financial write is automatically retried. Workers use separate
+persistent HTTP sessions and finite request timeouts.
+
+There is no documented Stock+ order WebSocket in the sources checked. The UTA
+order channel documents spot/margin/futures, and is not used for Stock+ here.
+**Sustained sub-second detection is not guaranteed by this REST implementation.**
+Bursts can improve notification time immediately after a command. Steady-state
+latency includes the poll gap, broker visibility delay, network time, and Kafka
+acknowledgement. Multiple fills between polls may appear as one cumulative fill
+update. A supported Stock+ push feed or a higher confirmed query allowance is
+needed to target sustained sub-second detection.
+
+Raw JSONL telemetry is written to `.state/bitget.monitor.jsonl` by default, with
+five rotated files of up to 10 MiB each plus the current file. `monitor.log_path`
+overrides this location. A JSON summary is also printed to the service log every
+60 seconds (`monitor.summary_seconds`). No credentials, signed headers, request
+bodies, or balances are logged. Health includes each worker's last successful
+refresh and latest error type.
+
+```bash
+.venv/bin/python tools/bitget_latency.py
+.venv/bin/python tools/bitget_latency.py --since 2026-11-05T00:00:00Z
+```
+
+The report includes counts, mean, p50/p95/p99, and maximum milliseconds for HTTP
+requests, quota waits, poll gaps, order observation-to-Kafka acknowledgement, and
+account refreshes. Order delivery statistics are separated by status, including
+`PARTIALLY_FILLED`, `FILLED`, and `CANCELED`. Broker-to-observation and
+broker-to-Kafka latency require the actual `updatedAt`; missing timestamps remain
+null and are counted separately. Initial and recovery snapshots are excluded
+from live latency percentiles. Broker timestamps may have only second precision
+and depend on clock alignment. Negative values are flagged as clock skew and
+excluded. `updatedAt` is an order update time, not necessarily an individual
+execution timestamp. Kafka acknowledgement does not measure downstream UI or
+consumer latency. `since_order_observed_ms` for an account refresh measures the
+local follow-up, not proof that the broker's balances have incorporated the fill.
+
+The durable publication journal is reused for retries and sequences. Monitor
+mode explicitly permits publication of prior-day order updates; the default
+today-only publication behavior remains for other workflows. Stop and join all
+workers before closing the publisher. Authentication or unexpected worker failure
+halts command intake; temporary read/delivery errors are logged and retried with
+backoff. To revert the scheduling mode, disable `monitor.enabled` and restart the
+existing service, preserving all journals and quota files.
+
 ## Five accounts on separate servers
 
 Run one Bitget worker per account, with that account's credentials and routing on

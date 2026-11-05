@@ -32,6 +32,17 @@
       "trading_enabled": false,
       "journal_account": "",
       "market": "US",
+      "monitor": {
+        "enabled": false,
+        "poll_seconds": 1.2,
+        "burst_poll_seconds": 0.25,
+        "burst_seconds": 2,
+        "command_reserve": 5,
+        "account_seconds": 5,
+        "reconcile_seconds": 60,
+        "discovery_seconds": 300,
+        "summary_seconds": 60
+      },
       "routing": {
         "account_id": "ACC-BITGET",
         "account_num_id": 1

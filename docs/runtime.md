@@ -34,6 +34,13 @@ For direct broker adapters, cancel-all discovery finishes before any cancellatio
 
 With `kafka.publish_snapshots:true` (the live default), startup and periodic refreshes publish account snapshots to `account-details` and full order snapshots to `order-status`. The example interval is 30 seconds, scheduled from completion of the previous refresh attempt. After an order/cancellation, the worker commits the processed input and waits two seconds before refreshing; reporting failure never resubmits that financial command. Persistent trading controls and explicit account/order queries also refresh reporting.
 
+Bitget can opt into independent monitoring with `brokers.bitget.monitor.enabled`.
+This replaces its periodic/post-action snapshot loop with order, account, and
+reconciliation workers, a shared Stock+ request budget, and JSON latency logs.
+Order updates are published promptly without waiting for account queries. See
+[Bitget monitoring](../bitget/README.md#order-monitoring-and-latency-statistics)
+for defaults, quota limits, latency definitions, and the statistics command.
+
 Output topics must already exist. The worker verifies them before sending; it does not provision topics. `result_topic`, when configured, must be separate from the command/account/order topics. Live and preview consumer groups remain distinct. Preview mode does not publish account/order data or call brokers.
 
 Order snapshots follow KTrader v1: exact string broker IDs, immutable creation times, cumulative fills, distinct lifecycle states, and actual average execution prices. Broker acknowledgement is never treated as a fill. External/manual orders and today's completed orders are included. One record's mapping failure does not discard valid siblings; broker-wide read failures remain explicit. Multi-leg orders that cannot be represented by the single-symbol schema are reported as mapping errors while the raw `orders_today.py` query remains available.

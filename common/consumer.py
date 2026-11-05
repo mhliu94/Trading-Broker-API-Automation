@@ -45,7 +45,13 @@ def _consume(runner, config, max_messages=0):
     producer = None
     publisher = None
     reporter = None
+    monitor = None
+    monitor_failed = False
+    monitor_enabled = runner.broker == 'bitget' and runner.config.get('monitor', {}).get('enabled', False)
     snapshots_enabled = runner.execute and settings.get("publish_snapshots", True)
+    if runner.execute and monitor_enabled and not snapshots_enabled:
+        consumer.close()
+        raise ConfigurationError('Bitget monitoring requires kafka.publish_snapshots=true')
     result_topic = settings.get("result_topic")
     account_topic = settings.get("account_topic", "account-details")
     order_topic = settings.get("order_topic", "order-status")
@@ -77,7 +83,18 @@ def _consume(runner, config, max_messages=0):
         publication_path = settings.get("publication_journal") or str(runner.journal_path.with_suffix(".publication.sqlite3"))
         publisher = SnapshotPublisher(publication_path,{**routing,"timezone":runner.config.get("timezone","America/New_York")},producer,
                                       account_topic=account_topic,order_topic=order_topic)
-        reporter = RuntimeSnapshots(runner,publisher)
+        if monitor_enabled:
+            from bitget.monitor import StockMonitor
+            publisher.allow_prior_orders = True
+            try:
+                monitor = StockMonitor(runner, publisher)
+            except Exception:
+                publisher.close()
+                producer.close()
+                consumer.close()
+                raise
+        else:
+            reporter = RuntimeSnapshots(runner,publisher)
     processed = 0
     next_refresh = time.monotonic()
     stopped = False
@@ -127,9 +144,21 @@ def _consume(runner, config, max_messages=0):
         if reporter:refresh("startup")
         if isinstance(getattr(runner,"journal",None),Journal) and runner.journal.unresolved(runner.scope):
             reconciliation_required=stopped=True
+        if monitor and not stopped:
+            monitor.start()
         if health:health.update(status="authentication_required" if authentication_required else "running")
+        next_monitor_health = 0.0
         while not stopped:
             if health and health.should_stop():break
+            if monitor:
+                if monitor.failure is not None:
+                    authentication_required = type(monitor.failure).__name__ == 'AuthenticationError'
+                    monitor_failed = not authentication_required
+                    stopped = True
+                    break
+                if health and time.monotonic() >= next_monitor_health:
+                    health.update(monitor=monitor.snapshot())
+                    next_monitor_health = time.monotonic() + 5
             if reporter and time.monotonic()>=next_refresh:refresh("periodic")
             if stopped:break
             batches=consumer.poll(timeout_ms=1000,max_records=1)
@@ -153,6 +182,8 @@ def _consume(runner, config, max_messages=0):
                     # never replays a financial command or rolls back its journal.
                     tp = TopicPartition(record.topic, record.partition)
                     consumer.commit({tp: OffsetAndMetadata(record.offset + 1, "", -1)})
+                    if monitor:
+                        monitor.notify(result)
                     action=result.get("action")
                     if reporter and action in {"place_order","cancel_order","cancel_open_orders","set_trading_enabled","positions","orders_today"}:
                         if action in {"place_order","cancel_order","cancel_open_orders"} and post_delay:
@@ -166,8 +197,9 @@ def _consume(runner, config, max_messages=0):
                     if max_messages and processed >= max_messages:return
     finally:
         consumer.close()
+        if monitor:monitor.close()
         if publisher:publisher.close()
         if producer:
             producer.close()
         for signum,handler in old_handlers.items():signal.signal(signum,handler)
-        if health:health.update(status="authentication_required" if authentication_required else ("reconciliation_required" if reconciliation_required else "stopped"),processed=processed)
+        if health:health.update(status="authentication_required" if authentication_required else ("reconciliation_required" if reconciliation_required else ("monitor_failed" if monitor_failed else "stopped")),processed=processed)

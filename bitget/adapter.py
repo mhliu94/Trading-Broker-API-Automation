@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 from collections import deque
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -14,6 +15,8 @@ import hmac
 import json
 import math
 import re
+from pathlib import Path
+import threading
 import time
 from urllib.parse import urlencode, urlsplit
 from zoneinfo import ZoneInfo
@@ -56,6 +59,21 @@ class Adapter:
         except UnsupportedOrder as exc:
             raise ConfigurationError("Bitget adapter supports US stocks only") from exc
         self._trade_times = deque()
+        self._request_context = threading.local()
+        self.request_observer = None
+        self._limiter = None
+        monitor = self.config.get("monitor", {})
+        if not isinstance(monitor, dict) or type(monitor.get("enabled", False)) is not bool:
+            raise ConfigurationError("Bitget monitor must be an object with a boolean enabled flag")
+        if monitor.get("enabled"):
+            from bitget.rate_limit import TradeRateLimiter
+            account = self.config.get("journal_account")
+            if not isinstance(account, str) or not account.strip():
+                raise ConfigurationError("Bitget monitoring requires a stable journal_account")
+            scope = hashlib.sha256((self.base_url + ':' + account).encode()).hexdigest()[:16]
+            default_path = Path(__file__).resolve().parents[1] / '.state' / f'bitget.{scope}.quota.json'
+            self._limiter = TradeRateLimiter(monitor.get('rate_limit_path', default_path),
+                                            monitor.get('command_reserve', 5))
         try:
             self._session_name(self.config.get("default_outside_rth", "AnyTime"))
         except UnsupportedOrder as exc:
@@ -193,13 +211,66 @@ class Adapter:
             return RequestRejected(description, code=code, http_status=status)
         return OutcomeUnknown(description)
 
+    @contextmanager
+    def monitoring_requests(self, lane, stop):
+        self._request_context.lane = lane
+        self._request_context.stop = stop
+        try:
+            yield
+        finally:
+            session = getattr(self._request_context, 'session', None)
+            if session is not None:
+                session.close()
+                del self._request_context.session
+            self._request_context.lane = 'command'
+            self._request_context.stop = None
+
     def _request(self, method: str, path: str, params=None, payload=None):
+        if self._limiter is None:
+            return self._raw_request(method, path, params, payload)
+        from bitget.rate_limit import MonitorStopped
+        lane = getattr(self._request_context, 'lane', 'command')
+        stop = getattr(self._request_context, 'stop', None)
+        if stop is not None and stop.is_set():
+            raise MonitorStopped("Stock+ monitor stopped")
+        started = time.monotonic()
+        wait_ms = 0.0
+        sent = None
+        error = None
+        self._request_context.http_status = None
+        self._request_context.broker_code = None
+        try:
+            if path.startswith(PREFIX + '/trade/'):
+                wait_ms = self._limiter.acquire(background=lane != 'command',
+                                                low_priority=lane == 'reconcile', stop=stop)
+            else:
+                wait_ms = self._limiter.wait_cooldown(stop)
+            sent = time.monotonic()
+            return self._raw_request(method, path, params, payload)
+        except Exception as exc:
+            error = type(exc).__name__
+            raise
+        finally:
+            if self.request_observer is not None:
+                ended = time.monotonic()
+                # No URL query, payload, signed headers, or broker error text.
+                try:
+                    self.request_observer('monitor_request', lane=lane, method=method, endpoint=path,
+                                          http_status=self._request_context.http_status,
+                                          broker_code=self._request_context.broker_code, error_type=error,
+                                          rate_limit_wait_ms=round(wait_ms, 3),
+                                          http_ms=round((ended - sent) * 1000, 3) if sent is not None else None,
+                                          total_ms=round((ended - started) * 1000, 3))
+                except Exception:
+                    print(json.dumps({'event': 'monitor_telemetry_error', 'component': 'request'}), flush=True)
+
+    def _raw_request(self, method: str, path: str, params=None, payload=None):
         import requests
 
         for key in ("api_key", "api_secret", "passphrase"):
             if not self.config.get(key):
                 raise ConfigurationError(f"Bitget config requires {key}")
-        if path.startswith(PREFIX + "/trade/"):
+        if self._limiter is None and path.startswith(PREFIX + "/trade/"):
             # Stock+ has its own quota, not UTA/crypto's higher rate. Pace all
             # trade calls conservatively within this adapter process.
             now = time.monotonic()
@@ -226,9 +297,17 @@ class Adapter:
             "locale": "en-US",
         }
         try:
-            response = requests.request(
+            request = requests.request
+            timeout = self.config.get("timeout", 20)
+            if self._limiter is not None:
+                if not hasattr(self._request_context, 'session'):
+                    self._request_context.session = requests.Session()
+                request = self._request_context.session.request
+                if getattr(self._request_context, 'lane', 'command') != 'command':
+                    timeout = (3.05, 5)
+            response = request(
                 method, self.base_url + path, headers=headers, data=body or None,
-                timeout=self.config.get("timeout", 20), allow_redirects=False,
+                timeout=timeout, allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise OutcomeUnknown("Bitget request failed; an order submission may have succeeded. Reconcile before retrying.") from exc
@@ -236,6 +315,11 @@ class Adapter:
             result = response.json()
         except ValueError:
             result = None
+        if self._limiter is not None:
+            self._request_context.http_status = response.status_code
+            self._request_context.broker_code = str(result.get('code')) if isinstance(result, dict) else None
+            if response.status_code == 429 or self._request_context.broker_code == '429':
+                self._limiter.throttle(response.headers.get('Retry-After'))
         if not 200 <= response.status_code < 300 or not isinstance(result, dict) or str(result.get("code")) != "00000":
             raise self._response_error(response.status_code, result)
         if "data" not in result:

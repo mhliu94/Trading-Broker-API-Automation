@@ -151,14 +151,15 @@ def _state(snapshot):
 class SnapshotPublisher:
     """Send canonical snapshots through kafka-python's send(...).get(timeout).
 
-    routing needs account_id and may contain account_num_id and timezone. Only
-    orders created on today's date in that timezone are published or retried.
+    routing needs account_id and may contain account_num_id and timezone. By
+    default only orders created today are published or retried. The independent
+    Bitget monitor opts into allow_prior_orders for carried GTC orders.
     Prior/future-day pending rows remain retained for inspection, never replayed.
     Independent failures appear in publish_orders' result; callers can still
     publish the account snapshot. Account snapshots have no order sequence.
     """
     def __init__(self, path, routing, producer, account_topic="account-details",
-                 order_topic="order-status", timeout=30):
+                 order_topic="order-status", timeout=30, allow_prior_orders=False):
         self.path = Path(path).expanduser()
         self.account = _identifier(routing.get("account_id"), "account_id", 128)
         self.account_num_id = routing.get("account_num_id")
@@ -181,6 +182,19 @@ class SnapshotPublisher:
         self.db.commit()
         self._seen = set()
         self._thread_lock = threading.RLock()
+        self.allow_prior_orders = allow_prior_orders
+        self.delivery_observer = None
+
+    def known_orders(self):
+        """Validated durable observations, for restoring a monitor after restart."""
+        with self._locked():
+            identities = [row[0] for row in self.db.execute(
+                'SELECT order_id FROM snapshot_publications WHERE account_id=?', (self.account,))]
+            return [pending or published for published, pending in map(self._read, identities)]
+
+    def _eligible(self, snapshot, today):
+        created = _timestamp(snapshot['created_at'], 'created_at').astimezone(self.zone).date()
+        return created <= today if self.allow_prior_orders else created == today
 
     @contextmanager
     def _locked(self):
@@ -300,6 +314,13 @@ class SnapshotPublisher:
             if cursor.rowcount != 1:
                 raise PublicationError("Publication state changed during acknowledgement; preserve database")
         self._seen.add(snapshot["order_id"])
+        if self.delivery_observer is not None:
+            try:
+                self.delivery_observer(snapshot, acknowledgement)
+            except Exception:
+                # A telemetry failure must never turn an acknowledged delivery
+                # into a publication failure or replay a financial command.
+                print(_json({'event': 'monitor_telemetry_error', 'component': 'delivery'}), flush=True)
 
     def publish_orders(self, snapshots, *, now=None):
         """Retry today's pending messages, then publish observed changes.
@@ -330,7 +351,7 @@ class SnapshotPublisher:
             for identifier in pending_ids:
                 try:
                     _, pending = self._read(identifier)
-                    if _timestamp(pending["created_at"], "created_at").astimezone(self.zone).date() != today:
+                    if not self._eligible(pending, today):
                         result["skipped"] += 1
                         continue
                     self._deliver(pending)
@@ -347,7 +368,7 @@ class SnapshotPublisher:
                     snapshot = validate_order_snapshot(raw)
                     self._route(snapshot)
                     identifier = snapshot["order_id"]
-                    if _timestamp(snapshot["created_at"], "created_at").astimezone(self.zone).date() != today:
+                    if not self._eligible(snapshot, today):
                         result["skipped"] += 1
                         continue
                     if identifier in prepared and prepared[identifier] != snapshot:
