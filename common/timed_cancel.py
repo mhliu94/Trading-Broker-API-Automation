@@ -1,4 +1,4 @@
-"""Explicit limit-then-cancel execution, with durable recovery and no write replay.
+"""Explicit order-then-cancel execution, with durable recovery and no write replay.
 
 Callers must hold the account operation lock and authorize execution. Native
 FOK remains the default. This workflow can partially fill and can miss its
@@ -47,23 +47,34 @@ def _delays(adapter):
     return values
 
 
+def is_enabled(broker, config, command):
+    policy = config.get("fok_policy", "native")
+    if policy not in {"native", "timed_cancel"}:
+        raise ConfigurationError("fok_policy must be native or timed_cancel")
+    if broker == "bitget" and command.get("time_in_force") == "ioc":
+        policy = config.get("ioc_policy", "native")
+        if policy not in {"native", "timed_cancel"}:
+            raise ConfigurationError("ioc_policy must be native or timed_cancel")
+        return policy == "timed_cancel"
+    return policy == "timed_cancel" and command.get("time_in_force") == "fok" and broker != "zhuorui"
+
+
 def prepare(adapter, broker, command):
     """Pure preview: return a copied command and its explicit execution plan."""
     require_us_equity(command,adapter.config)
     us_stock_symbol(command.get("symbol"))
-    policy = adapter.config.get("fok_policy", "native")
-    if policy not in {"native", "timed_cancel"}:
-        raise ConfigurationError("fok_policy must be native or timed_cancel")
     converted = deepcopy(command)
-    enabled = policy == "timed_cancel" and command.get("time_in_force") == "fok" and broker != "zhuorui"
+    enabled = is_enabled(broker, adapter.config, command)
+    ioc = broker == "bitget" and command.get("time_in_force") == "ioc"
     if enabled:
         if broker not in BROKERS:
             raise UnsupportedOrder("Timed cancellation is unavailable for this broker")
-        if command.get("order_type") != "limit":
+        if command.get("order_type") != "limit" and not (ioc and command.get("order_type") == "market"):
             raise UnsupportedOrder("Timed cancellation requires an explicit limit order")
         if command.get("auction_intent"):
             raise UnsupportedOrder("Timed cancellation cannot preserve LULD reopening-auction intent")
-        delay = _seconds(adapter.config.get("cancel_after_seconds", 1), "cancel_after_seconds", 300)
+        delay_key = "ioc_cancel_after_seconds" if ioc else "cancel_after_seconds"
+        delay = _seconds(adapter.config.get(delay_key, 0.5 if ioc else 1), delay_key, 300)
         _delays(adapter)
         tif = "day"
         converted["time_in_force"] = tif
@@ -73,12 +84,15 @@ def prepare(adapter, broker, command):
         client_id = request.get(CLIENT_FIELDS[broker])
         if not isinstance(client_id, str) or not client_id:
             raise ConfigurationError("Timed cancellation requires a deterministic broker client reference")
-        plan.update(native_fok=False, execution_semantics="limit_then_timed_cancel", partial_fills_possible=True,
-                    requested_time_in_force="fok", submitted_time_in_force=converted["time_in_force"],
+        plan.update(native_fok=False, execution_semantics="order_then_timed_cancel" if ioc else "limit_then_timed_cancel", partial_fills_possible=True,
+                    requested_time_in_force=command["time_in_force"], submitted_time_in_force=converted["time_in_force"],
                     cancel_after_seconds=delay, client_order_id=client_id,
-                    timing="Deadline starts at submission dispatch; network delays can make cancellation late",
+                    timing=("Deadline starts at successful submission acknowledgement; network delays can make cancellation late" if ioc else
+                            "Deadline starts at submission dispatch; network delays can make cancellation late"),
                     client_reference_kind="remark" if broker=="bitget" else "client_order_id",
                     server_idempotency_confirmed=False if broker=="bitget" else None)
+        if ioc:
+            plan["native_ioc"] = False
     return converted, plan
 
 
@@ -178,6 +192,10 @@ def _validate_ticket(broker, record, row):
         expected = tuple(request.get(key) for key in request_fields)
     if actual[:3] != expected[:3]:
         raise BrokerError("Order detail symbol, side or type differs from the submitted ticket")
+    if broker == "bitget" and request["orderType"] == "MO":
+        # A market order has no submitted limit. Its reported price may be null
+        # or an execution price; identity, symbol, side, type and shares still match.
+        actual, expected = actual[:4], expected[:4]
     try:
         numeric_actual = [Decimal(str(value)) for value in actual[3:]]
         numeric_expected = [Decimal(str(value)) for value in expected[3:]]
@@ -252,8 +270,11 @@ def _write_cancel(adapter, broker, record, detail):
 
 
 def _result(record, status, **details):
+    requested_tif = record.get("requested_time_in_force", "fok")
     return {"status": status, "command_id": record["command_id"], "broker": record["broker"],
-            "native_fok": False, "execution_semantics": "limit_then_timed_cancel", "partial_fills_possible": True,
+            "native_fok": False, "execution_semantics": "order_then_timed_cancel" if requested_tif == "ioc" else "limit_then_timed_cancel", "partial_fills_possible": True,
+            "requested_time_in_force": requested_tif,
+            **({"native_ioc": False} if requested_tif == "ioc" else {}),
             "order_id": record.get("order_id"), "client_order_id": record["client_order_id"],
             "submission": record.get("submission"), "submission_confirmed": bool(record.get("order_id")),
             "cancellation": record.get("cancellation"), "cancellation_confirmed": False,
@@ -352,7 +373,7 @@ def execute(adapter, broker, command, journal, scope):
     """Submit once, then request cancellation at the deadline and confirm detail."""
     converted, plan = prepare(adapter, broker, command)
     if not plan["enabled"]:
-        raise ConfigurationError("Timed execution requires an explicit timed_cancel FOK plan")
+        raise ConfigurationError("Timed execution requires an explicit timed_cancel plan")
     _ensure(journal)
     identity = _identity(command.get("id"))
     digest = hashlib.sha256(encoded(command).encode()).hexdigest()
@@ -374,6 +395,7 @@ def execute(adapter, broker, command, journal, scope):
     dispatch_at = time.time()
     record = {"command_id": identity, "broker": broker, "command": converted, "request": plan["request"],
               "client_order_id": plan["client_order_id"], "state": "submission_pending",
+              "requested_time_in_force": plan["requested_time_in_force"],
               "dispatch_at": dispatch_at, "deadline_at": dispatch_at + plan["cancel_after_seconds"]}
     with journal.db:
         journal.db.execute("INSERT INTO timed_cancellations VALUES (?,?,?,?,?,?)",
@@ -403,6 +425,12 @@ def execute(adapter, broker, command, journal, scope):
         record["result"] = result
         _save(journal, scope, record, "submission_unknown")
         return result
+    if plan["requested_time_in_force"] == "ioc":
+        # IOC emulation waits after successful acceptance. Persist the deadline
+        # so recovery cancels this same order without creating a replacement.
+        dispatched = time.monotonic()
+        record["accepted_at"] = time.time()
+        record["deadline_at"] = record["accepted_at"] + plan["cancel_after_seconds"]
     _save(journal, scope, record, "cancel_pending")
     remaining = max(0, plan["cancel_after_seconds"] - (time.monotonic() - dispatched))
     return _finish_pending(adapter, broker, journal, scope, record, remaining=remaining)

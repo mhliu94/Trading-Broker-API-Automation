@@ -95,12 +95,9 @@ class Runner:
             if self.execute and self.journal and (self.journal.unresolved(self.scope) or self.unresolved_timed()):
                 raise ConfigurationError("An earlier account operation is unresolved; inspect/reconcile the journal before new submissions")
             validate_age(payload, kafka_timestamp_ms, float(self.config.get("command_max_age_seconds", 120)))
-            policy = self.config.get("fok_policy", "native")
-            if policy not in {"native", "timed_cancel"}:
-                raise ConfigurationError("fok_policy must be native or timed_cancel")
+            from .timed_cancel import is_enabled, prepare
             timed_plan = None
-            if policy == "timed_cancel" and command["time_in_force"] == "fok" and self.broker != "zhuorui":
-                from .timed_cancel import prepare
+            if is_enabled(self.broker, self.config, command):
                 _, timed_plan = prepare(self.adapter, self.broker, command)
                 plan = timed_plan["request"]
             else:
@@ -132,6 +129,10 @@ class Runner:
                 "fok_policy": self.config.get("fok_policy", "native"),
                 "timed_cancel_requires_opt_in": True,
                 "timed_cancel_is_native_fok": False}
+            if self.broker == "bitget":
+                data["runtime"].update(ioc_policy=self.config.get("ioc_policy", "native"),
+                    ioc_cancel_after_seconds=self.config.get("ioc_cancel_after_seconds", 0.5),
+                    timed_cancel_is_native_ioc=False)
             return {**base, "status": "ok", "data": data}
         elif not self.execute:
             return {**base, "status": "dry_run", "request": command, "requests_sent": 0}

@@ -140,8 +140,7 @@ def test_health_includes_the_rejection_reason(runner, monkeypatch):
 
 def test_live_incident_market_order_is_rejected_locally_and_limit_can_follow(runner):
     runner.adapter.config["default_outside_rth"] = "Auto"
-    with patch("bitget.adapter.datetime") as clock, patch("requests.request") as request:
-        clock.now.return_value = datetime.fromisoformat("2026-11-05T01:28:36+00:00")
+    with patch.object(runner.adapter, "_automatic_session", return_value="Overnight"), patch("requests.request") as request:
         from common.errors import UnsupportedOrder
         with pytest.raises(UnsupportedOrder, match="explicit limit_price"):
             runner.process(payload(order_type="market", limit_price=None, symbol="AEHL", quantity="10"))

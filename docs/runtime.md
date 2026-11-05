@@ -60,6 +60,15 @@ Unknown cost basis remains null; a broker's negative diluted position cost remai
 
 ## Native FOK and optional timed cancellation
 
+Bitget also supports explicit IOC emulation with `ioc_policy:"timed_cancel"`.
+For `time_in_force:"ioc"`, the runtime submits the original market or limit order
+as DAY and waits `ioc_cancel_after_seconds` (default 0.5 seconds) after successful
+submission acknowledgement before canceling the remaining quantity. Market
+orders retain the adapter's session restrictions. Partial fills remain effective;
+network and broker latency can delay cancellation. Previews and results identify
+`native_ioc:false` and the requested IOC semantics. Pending cancellation uses the
+same durable recovery and exact-order checks described below.
+
 Native FOK is the default and uses only combinations supported by the broker. For the six direct API adapters, setting `fok_policy:"timed_cancel"` explicitly enables the reference-style limit-then-cancel workflow for FOK commands. An offline preview shows the actual submitted DAY/GTC request, `native_fok:false`, and `partial_fills_possible:true`. Zhuorui continues to use its own `allow_timed_cancel_fok` option and upstream journal.
 
 The timer targets `cancel_after_seconds` from submission dispatch (default one second). Network/durable-state latency can miss the target. The workflow persists intent before submission, saves only an unambiguous accepted broker reference, then validates that exact account/ticket before cancellation. It never selects an order using only symbol, quantity or timing. It queries terminal state after a cancellation acknowledgement. An acknowledged but still-open order remains unresolved.

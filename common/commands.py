@@ -18,7 +18,8 @@ ORDER_REFERENCE_KEYS = ("order_id", "orderId", "order_reference", "orderReferenc
 SUBMISSION_KEYS = ("side", "direction", "quantity", "qty_shares", "qty", "shares", "limit_price", "limitPrice", "price", "limit",
                    "notional", "notional_usd", "notionalUsd", "dollar_amount", "dollars", "cancel_unfilled", "time_in_force", "timeInForce", "tif", "options", "auction_intent")
 ORDER_TYPES = {"market": "market", "market_order": "market", "limit": "limit", "limit_order": "limit",
-               "fok": "fok", "fill_or_kill": "fok", "limit_order_fok": "fok"}
+               "fok": "fok", "fill_or_kill": "fok", "limit_order_fok": "fok",
+               "ioc": "ioc", "immediate_or_cancel": "ioc", "limit_order_ioc": "ioc"}
 CANCEL_TYPES = {"cancel_order": "cancel_order", "cancel": "cancel_order",
                 "cancel_open_orders": "cancel_open_orders", "cancel_all": "cancel_open_orders",
                 "cancel_all_orders": "cancel_open_orders", "cancel_pending_orders": "cancel_open_orders"}
@@ -162,7 +163,7 @@ def normalize(payload, broker, config, message_id=None, require_account=False):
             raise CommandError("This query returns all symbols; omit symbol")
         return result
     if any(v not in ORDER_TYPES and v not in {"order", "place_order", "submit_order", "trade"} for v in all_values):
-        raise CommandError("Unsupported command action; use market/limit/FOK, positions, or orders_today")
+        raise CommandError("Unsupported command action; use market/limit/FOK/IOC, positions, or orders_today")
     kinds = [ORDER_TYPES[v] for v in all_values if v in ORDER_TYPES]
     if not kinds:
         raise CommandError("Explicit order_type/type is required")
@@ -173,6 +174,8 @@ def normalize(payload, broker, config, message_id=None, require_account=False):
         if not isinstance(payload["cancel_unfilled"], bool):
             raise CommandError("cancel_unfilled must be a JSON boolean")
         if payload["cancel_unfilled"]:
+            if kind == "ioc":
+                raise CommandError("cancel_unfilled=true requests FOK and conflicts with the IOC order type")
             if kind == "market":
                 raise CommandError("cancel_unfilled requires a limit order")
             kind = "fok"
@@ -180,14 +183,13 @@ def normalize(payload, broker, config, message_id=None, require_account=False):
             raise CommandError("cancel_unfilled=false conflicts with the FOK order type")
     configured_asset = "us_equity"
     default_tif = config.get("default_time_in_force", "day")
-    tif = alias(payload, ("time_in_force", "timeInForce", "tif"), token, "fok" if kind == "fok" else default_tif)
-    if tif == "fill_or_kill":
-        tif = "fok"
-    if kind == "fok" and tif != "fok":
-        raise CommandError("FOK order conflicts with time_in_force")
+    tif = alias(payload, ("time_in_force", "timeInForce", "tif"), token, kind if kind in {"fok", "ioc"} else default_tif)
+    tif = {"fill_or_kill": "fok", "immediate_or_cancel": "ioc"}.get(tif, tif)
+    if kind in {"fok", "ioc"} and tif != kind:
+        raise CommandError(f"{kind.upper()} order conflicts with time_in_force")
     if tif not in {"day", "gtc", "gtd", "ioc", "fok"}:
         raise CommandError("Unsupported time_in_force")
-    kind = "limit" if kind == "fok" else kind
+    kind = "limit" if kind in {"fok", "ioc"} else kind
     symbol = alias(payload, ("symbol", "ticker", "code"), lambda v: us_stock_symbol(text(v), qualified=broker in {"bitget", "longbridge"}))
     side = alias(payload, ("side", "direction"), token)
     if symbol is None or len(symbol) > 64 or (broker != "tradestation" and any(c.isspace() for c in symbol)) or (symbol and any(c in symbol for c in "\t\r\n")):
