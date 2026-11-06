@@ -52,6 +52,12 @@ class RuntimeSnapshots:
             rows=[]
             report["errors"].append({"component":"orders","error_type":type(exc).__name__,"error":str(exc) if isinstance(exc,BrokerError) else "Order snapshots failed"})
         try:
+            if runner.broker == 'bitget':
+                from bitget.feedback import CommandFeedback
+                feedback = CommandFeedback(runner)
+                feedback.refresh()
+                rows = [feedback.correlate(row) for row in rows] + feedback.rejections()
+                self.publisher.allow_prior_orders = True
             report["order_publication"]=self.publisher.publish_orders(rows)
         except Exception as exc:
             report["errors"].append({"component":"order_delivery","error_type":type(exc).__name__,"error":str(exc) if isinstance(exc,BrokerError) else "Order publication failed"})

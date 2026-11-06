@@ -217,11 +217,17 @@ def _consume(runner, config, max_messages=0):
             for records in batches.values():
                 for record in records:
                     identity = f"{record.topic}:{record.partition}:{record.offset}"
+                    payload = None
                     try:
-                        result = runner.process(decode_command(record.value), identity, record.timestamp, require_account=True)
+                        payload = decode_command(record.value)
+                        result = runner.process(payload, identity, record.timestamp, require_account=True)
                     except BrokerError as exc:
                         result = {"status": "rejected", "broker": runner.broker, "message_id": identity,
                                   "error_type": type(exc).__name__, "error": str(exc)}
+                        if payload is not None and isinstance(getattr(runner, 'journal', None), Journal):
+                            rejection = runner.record_preflight_rejection(payload, exc, identity, record.timestamp)
+                            if rejection is not None:
+                                result = rejection
                     output = encoded(result).encode()
                     print(output.decode(), flush=True)
                     if result.get("status")=="authentication_required":

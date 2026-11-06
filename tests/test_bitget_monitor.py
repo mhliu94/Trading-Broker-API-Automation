@@ -122,6 +122,26 @@ def test_prior_day_gtc_cancellation_is_published(monitor):
     assert [r['status'] for _, r in monitor.publisher.producer.sent] == ['NEW', 'CANCELED']
 
 
+def test_restart_republishes_correlated_prior_day_terminal_order(monitor, monkeypatch):
+    from common.commands import normalize
+    command = normalize({'id': 'origin-old', 'type': 'LIMIT_ORDER', 'symbol': 'AAPL',
+        'side': 'BUY', 'quantity': 3, 'limit_price': 190.5}, 'bitget', monitor.runner.config)
+    monitor.runner.journal.reserve(monitor.runner.scope, command)
+    monitor.runner.journal.finish(monitor.runner.scope, command['id'],
+        {'status': 'submitted', 'data': {'orderId': '001'}})
+    row = raw(submittedAt=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+              status='Filled', executedQuantity='3', executedPrice='190')
+    legacy = {**monitor.adapter.snapshot_order(row, datetime.now(timezone.utc)),
+              **monitor.routing, 'schema_version': 1}
+    monitor.publisher.publish_orders([legacy])
+    monkeypatch.setattr('bitget.monitor.threading.Thread', Mock())
+    monitor.start()
+    monitor.publisher.publish_orders(list(monitor.pending.values()))
+    last = monitor.publisher.producer.sent[-1][1]
+    assert last['command_id'] == 'origin-old' and last['sequence'] == 1
+    assert last['filled_quantity'] == 3 and last['status'] == 'FILLED'
+
+
 def test_kafka_outage_retains_fill_and_retries_without_any_trade(monitor):
     initial = raw()
     observe(monitor, [initial])

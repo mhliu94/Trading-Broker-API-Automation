@@ -21,6 +21,7 @@ from common.utils import parse_time, today_window
 from .rate_limit import MonitorStopped
 from .telemetry import LatencyLog
 from .adapter import ACTIVE
+from .feedback import CommandFeedback
 
 
 CLOSED = {'FILLED', 'CANCELED', 'REJECTED', 'EXPIRED'}
@@ -69,6 +70,7 @@ class StockMonitor:
         self.detail_turn = False
         self.detail_cursor = 0
         self.closed = False
+        self.feedback = CommandFeedback(runner)
 
     def _seconds(self, key, default, low, high):
         value = self.settings.get(key, default)
@@ -78,7 +80,14 @@ class StockMonitor:
 
     def start(self):
         # Restore active orders even when they were created before midnight.
-        self.known = {s['order_id']: s for s in self.publisher.known_orders()}
+        restored = {s['order_id']: s for s in self.publisher.known_orders()}
+        self.feedback.refresh()
+        self.known = {k: self.feedback.correlate(v) for k, v in restored.items()}
+        # Publish newly recovered correlations, including prior-day terminals.
+        # The outbox retries its own durable pending records; unchanged delivered
+        # snapshots need no resend or in-memory retry entry.
+        self.pending = {k: {f: v for f, v in s.items() if f != 'sequence'}
+                        for k, s in self.known.items() if fingerprint(s) != fingerprint(restored[k])}
         self.publisher.delivery_observer = self._delivered
         self.adapter.request_observer = self.log.emit
         self.log.emit('monitor_started', transport='rest', poll_seconds=self.poll_seconds,
@@ -149,12 +158,14 @@ class StockMonitor:
         self.account_wake.set()
 
     def _observe(self, rows, source, observed_at, observed_mono):
+        self.feedback.refresh()
         for raw in rows:
             try:
                 if not self.adapter._is_stock(raw):
                     continue
                 snapshot = validate_order_snapshot({**self.adapter.snapshot_order(raw, observed_at),
                                                      **self.routing, 'schema_version': 1})
+                snapshot = self.feedback.correlate(snapshot, raw.get('remark'))
                 identity = snapshot['order_id']
                 previous = self.known.get(identity)
                 if previous is not None and previous['symbol'] != snapshot['symbol']:
@@ -250,6 +261,12 @@ class StockMonitor:
                 self._observe(rows, source, observed_at, observed_mono)
             started = time.monotonic()
             try:
+                self.feedback.refresh()
+                feedback_result = self.publisher.publish_orders(self.feedback.rejections() + list(self.pending.values()))
+                if feedback_result['failed']:
+                    self._error('feedback', BrokerError('Command feedback delivery pending'))
+                else:
+                    self._success('feedback')
                 with self.lock:
                     identity = self.priority.popleft() if self.priority else None
                     while identity and self.known.get(identity, {}).get('status') in CLOSED:

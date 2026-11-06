@@ -69,6 +69,19 @@ class Journal:
                         ("unknown" if result.get("submission_outcome")=="unknown" else result["status"], encoded(result), scope, command_id))
         self.db.commit()
 
+    def reject_unsubmitted(self, scope, command, result):
+        """Atomically cache a pre-dispatch rejection without a pending window.
+
+        Never replace an existing reservation or outcome, even on ID conflicts.
+        """
+        fingerprint = hashlib.sha256(encoded(command).encode()).hexdigest()
+        with self.db:
+            cursor = self.db.execute(
+                "INSERT OR IGNORE INTO commands(scope,id,fingerprint,state,result,command) "
+                "VALUES (?,?,?,'rejected',?,?)",
+                (scope, command['id'], fingerprint, encoded(result), encoded(command)))
+        return cursor.rowcount == 1
+
     def release_unaccepted_auth(self, scope, command_id):
         """Only after explicit transport evidence that no submission was accepted."""
         self.db.execute("DELETE FROM commands WHERE scope=? AND id=? AND state='pending'",(scope,command_id))

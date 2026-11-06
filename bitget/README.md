@@ -131,6 +131,33 @@ halts command intake; temporary read/delivery errors are logged and retried with
 backoff. To revert the scheduling mode, disable `monitor.enabled` and restart the
 existing service, preserving all journals and quota files.
 
+### Control-server command feedback
+
+Order snapshots echo the originating `command_id`, matched using the persisted
+broker order ID or exact deterministic remark and checked against the original
+symbol, side, quantity, type and price. Manual orders are never assigned to a
+command by symbol or quantity alone. Restart recovery revisits durable prior-day
+terminal snapshots as well as current orders, publishing newly recovered command
+correlations while preserving change-only publication and durable delivery retries.
+
+Valid account-addressed commands rejected before dispatch (including stale,
+unsupported-session and unsupported-time-in-force requests) are now atomically
+journaled before the Kafka input offset is committed. Explicit broker rejections
+and reviewed rejection reconciliations also generate zero-fill `REJECTED`
+snapshots with the original command ID and reason. These have stable
+`rejected:<command-ID SHA256>` IDs because no broker order exists; their message
+distinguishes local validation from broker submission rejection. They do not
+represent executions. Unknown outcomes and conflicting command IDs never generate
+terminal rejection evidence.
+
+The monitor recovers these records from the original journal and retries delivery
+through the durable publication outbox, including after restart or midnight.
+`monitor.feedback_last_success` / `feedback_error` expose delivery health. A Kafka
+acknowledgement confirms transport delivery, not downstream processing; verify
+the control server's Unreconciled orders view after repairing an older backlog.
+Keep both journal databases. These safeguards cover missing correlation and lost
+rejection feedback; they cannot guarantee availability during external outages.
+
 ## Five accounts on separate servers
 
 Run one Bitget worker per account, with that account's credentials and routing on

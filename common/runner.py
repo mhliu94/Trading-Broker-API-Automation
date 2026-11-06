@@ -4,7 +4,7 @@ import math
 import time
 from pathlib import Path
 from .commands import normalize, validate_age
-from .errors import AuthenticationError, BrokerError, CancellationDiscoveryError, CommandError, ConfigurationError, OutcomeUnknown, RequestRejected
+from .errors import AuthenticationError, BrokerError, CancellationDiscoveryError, CommandError, ConfigurationError, OutcomeUnknown, RequestRejected, UnsupportedOrder
 from .journal import Journal
 from .locking import operation_lock
 from .registry import adapter_for
@@ -86,6 +86,30 @@ class Runner:
         from bitget.reconciliation import reconcile
         with operation_lock(self.lock_path, timeout=float(self.config.get("lock_timeout_seconds", 30))):
             return reconcile(self)
+
+    def record_preflight_rejection(self, payload, exc, message_id, kafka_timestamp_ms):
+        """Keep addressed, valid order rejections for durable control feedback.
+
+        Called only when process raised before dispatch. Existing journal rows
+        (including pending writes and ID conflicts) can never be overwritten.
+        """
+        if (self.broker != 'bitget' or not self.execute or not self.journal
+                or not isinstance(exc, (CommandError, ConfigurationError, UnsupportedOrder))):
+            return None
+        try:
+            command = normalize(payload, self.broker, self.config, message_id, True)
+        except BrokerError:
+            return None
+        if command is None or command.get('action') != 'place_order':
+            return None
+        from bitget.feedback import command_time
+        result = {'id': command['id'], 'broker': self.broker, 'action': 'place_order',
+                  'status': 'rejected', 'submission_outcome': 'not_submitted',
+                  'requests_sent': 0, 'error_type': type(exc).__name__, 'error': str(exc),
+                  'observed_at': iso_utc(datetime.now(timezone.utc)),
+                  'feedback_created_at': command_time(payload, kafka_timestamp_ms)}
+        with operation_lock(self.lock_path, timeout=float(self.config.get('lock_timeout_seconds', 30))):
+            return result if self.journal.reject_unsubmitted(self.scope, command, result) else None
 
     def _process(self, payload, message_id=None, kafka_timestamp_ms=None, require_account=False):
         command = normalize(payload, self.broker, self.config, message_id, require_account)
@@ -230,6 +254,10 @@ class Runner:
                 elif mutation:
                     result["submission_outcome"]="unknown"
         if journal_order:
+            if self.broker == 'bitget' and action == 'place_order':
+                from bitget.feedback import command_time
+                result['feedback_created_at'] = command_time(payload, kafka_timestamp_ms)
+                result.setdefault('observed_at', iso_utc(datetime.now(timezone.utc)))
             self.journal.finish(self.scope, command["id"], result)
         return result
 
