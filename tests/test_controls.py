@@ -28,6 +28,19 @@ def test_controls_normalize_and_conflicts_reject():
             normalize({"id":"x",**raw},"alpaca",{})
 
 
+@pytest.mark.parametrize("selector", ["symbol", "ticker", "code"])
+def test_bitget_smart_cancel_preserves_symbol_scope(selector):
+    command = normalize({"command_id": "smart-cancel", "type": "CANCEL_OPEN_ORDERS",
+                         "account_id": "BITGET_WXL", selector: "POM",
+                         "parent_id": "parent", "trading_mode": "H"},
+                        "bitget", {"routing": {"account_id": "BITGET_WXL"}}, require_account=True)
+    assert command == {"id": "smart-cancel", "broker": "bitget",
+                       "action": "cancel_open_orders", "symbol": "POM.US"}
+    with pytest.raises(CommandError, match="use cancel_order"):
+        normalize({"id": "x", "type": "CANCEL_OPEN_ORDERS", selector: "POM", "order_id": "a"},
+                  "bitget", {})
+
+
 def test_persistent_disable_survives_restart_and_old_enable_replay(tmp_path,monkeypatch):
     adapter=Mock()
     monkeypatch.setattr("common.runner.adapter_for",lambda *_:adapter)

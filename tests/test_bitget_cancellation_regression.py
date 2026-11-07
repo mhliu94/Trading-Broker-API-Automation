@@ -97,6 +97,27 @@ def test_cancel_all_missing_flag_finds_old_gtc_and_cancels_only_active_stock(run
     assert runner.adapter._request.call_count == 5
 
 
+def test_smart_algo_symbol_cancel_reaches_only_matching_broker_order_and_deduplicates(runner):
+    target = order("pom", symbol="POM.US")
+    other = order("other", symbol="AAPL.US")
+    runner.adapter._request = Mock(side_effect=[
+        {"orders": [target, other]}, {"orders": [target, other]}, target,
+        {"list": [{"symbol": "POM.US", "currency": "USD", "board": "USMain"}]},
+        {"orderId": "pom", "symbol": "POM.US"},
+    ])
+    command = {**cancel_command("smart-stop"), "symbol": "POM",
+               "parent_id": "parent", "trading_mode": "H"}
+    result = runner.process(command, require_account=True)
+    assert result["status"] == "cancel_requested"
+    assert result["data"]["cancellations_requested"] == 1
+    assert "POM.US" in result["data"]["scope"]
+    writes = [call for call in runner.adapter._request.call_args_list if call.args[0] == "POST"]
+    assert len(writes) == 1
+    assert writes[0].kwargs["payload"] == {"orderId": "pom", "symbol": "POM.US"}
+    assert runner.process(command, require_account=True)["duplicate"] is True
+    assert runner.adapter._request.call_count == 5
+
+
 @pytest.mark.parametrize("failure", [
     BrokerError("Malformed history"), OutcomeUnknown("Read timed out"), ValueError("private-detail"),
 ])

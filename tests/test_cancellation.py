@@ -231,6 +231,42 @@ def test_bitget_cancel_all_uses_exact_stock_ids_and_skips_terminal_pending_state
     adapter.open_stock_orders.assert_called_once_with()
 
 
+@pytest.mark.parametrize("symbol", ["POM", "POM.US"])
+def test_bitget_smart_cancel_only_cancels_matching_symbol(symbol):
+    adapter = Bitget({})
+    adapter.open_stock_orders = Mock(return_value=[
+        {"orderId": "pom", "symbol": "POM.US", "status": "New"},
+        {"orderId": "other", "symbol": "AAPL.US", "status": "New"},
+        {"orderId": "filled", "symbol": "POM.US", "status": "Filled"},
+        {"orderId": "pending", "symbol": "POM.US", "status": "PendingCancel"}])
+    adapter.cancel_stock_order = Mock(return_value={"orderId": "pom"})
+    result = cancel_open_orders(adapter, "bitget", {"symbol": symbol})
+    assert result["cancellations_requested"] == 1
+    assert result["cancellation_confirmed"] is False
+    assert "POM.US" in result["scope"]
+    adapter.cancel_stock_order.assert_called_once_with("pom", symbol="POM.US")
+
+
+def test_bitget_smart_cancel_without_matching_symbol_sends_nothing():
+    adapter = Bitget({})
+    adapter.open_stock_orders = Mock(return_value=[
+        {"orderId": "other", "symbol": "AAPL.US", "status": "New"}])
+    adapter.cancel_stock_order = Mock()
+    assert cancel_open_orders(adapter, "bitget", {"symbol": "POM"})["status"] == "no_action"
+    adapter.cancel_stock_order.assert_not_called()
+
+
+def test_bitget_smart_cancel_validates_all_symbols_before_any_write():
+    adapter = Bitget({})
+    adapter.open_stock_orders = Mock(return_value=[
+        {"orderId": "pom", "symbol": "POM.US", "status": "New"},
+        {"orderId": "invalid", "status": "New"}])
+    adapter.cancel_stock_order = Mock()
+    with pytest.raises((BrokerError, CommandError)):
+        cancel_open_orders(adapter, "bitget", {"symbol": "POM"})
+    adapter.cancel_stock_order.assert_not_called()
+
+
 def test_bitget_unknown_cancel_acknowledgement_stops_without_retry():
     adapter = Bitget({})
     adapter.open_stock_orders = Mock(return_value=[{"orderId": identity, "symbol": "AAPL.US", "status": "New"} for identity in ("a", "b")])

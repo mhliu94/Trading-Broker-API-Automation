@@ -296,8 +296,14 @@ def _discover_open_orders(adapter, broker):
 def cancel_open_orders(adapter, broker, command=None):
     """Cancel discovered US-stock orders only; account-wide bulk delete is unsafe."""
     if broker=="zhuorui":return _zhuorui(adapter,"cancel_open_orders",command)
+    symbol = (adapter.stock_symbol(command["symbol"])
+              if broker == "bitget" and command and command.get("symbol") is not None else None)
     try:
         rows = _discover_open_orders(adapter, broker)
+        if symbol is not None:
+            # Smart algos request cancellation for their symbol. Never widen
+            # that intent to unrelated orders in the configured account.
+            rows = [row for row in rows if adapter.stock_symbol(row.get("symbol")) == symbol]
     except (AuthenticationError, CommandError):
         raise
     except Exception as exc:
@@ -306,4 +312,7 @@ def cancel_open_orders(adapter, broker, command=None):
         # starts, its partial/uncertain write results must retain their meaning.
         message = str(exc) if isinstance(exc, BrokerError) else "Open-order discovery failed"
         raise CancellationDiscoveryError(message + "; no cancellations sent") from exc
-    return _requests(broker,rows,lambda row:_send(adapter,broker,row))
+    result = _requests(broker,rows,lambda row:_send(adapter,broker,row))
+    if symbol is not None:
+        result["scope"] = "Configured account; open US-stock orders for " + symbol
+    return result

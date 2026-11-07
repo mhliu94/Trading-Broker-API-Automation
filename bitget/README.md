@@ -18,6 +18,12 @@ An explicit overnight limit command can use `"options":{"outside_rth":"Overnight
 
 A deterministic `remark` (`cmd:` plus a command-ID hash) correlates submissions. It is **not broker idempotency**. The docs mention `clientOid` in responses/cancellation but omit it from the placement request, so this adapter does not invent one. The local journal provides duplicate protection. Unknown write outcomes require reconciliation; writes are never automatically retried.
 
+Smart buying/selling can send `CANCEL_OPEN_ORDERS` with a `symbol`. Bitget limits
+that cancellation to open US-stock orders for the requested symbol in this account.
+Without a symbol, it cancels open US-stock orders across the configured account.
+Individual cancellation requests retain exact broker IDs and durable duplicate
+protection; terminal status is established from broker reads.
+
 Orders for a requested day combine `today-orders` and `history-orders`, deduplicate by exact ID and filter `submittedAt` to the configured day's UTC bounds. Historical `hasMore` splits the inclusive integer-second interval recursively. Live history responses may omit `hasMore` on empty or nonempty pages. With the flag absent, fewer than the documented 1000-order limit establishes a complete page; a full page triggers interval subdivision. An explicitly supplied flag must be boolean. A single second that cannot establish completeness, malformed pagination metadata, excessive windows, or rejected history range fails explicitly. Open-order cancellation queries history from Unix epoch through now as well as today's endpoint, preserving older GTC orders. Broker-side retention cannot be enlarged by this script; a server rejection is not silently replaced with a shorter range.
 
 Cancel-all discovers and validates the entire order list before sending cancellations. A failure during those reads rejects that command with `requests_sent:0` and `submission_outcome:not_submitted`, allowing the listener to continue. Authentication failures still stop intake. An uncertain cancellation starts automatic read-only reconciliation while the listener continues running. It never repeats the cancellation write or replays the original cancel-all command.

@@ -141,8 +141,11 @@ def normalize(payload, broker, config, message_id=None, require_account=False):
             symbol = alias(payload, ("symbol", "ticker", "code"), lambda v: us_stock_symbol(text(v), qualified=broker in {"bitget", "longbridge"}))
             if result["action"] == "cancel_order" and reference is None:
                 raise CommandError("cancel_order requires an explicit broker order_id")
-            if result["action"] == "cancel_open_orders" and (reference is not None or symbol is not None):
-                raise CommandError("cancel_open_orders targets the configured account; omit symbol and order_id")
+            if result["action"] == "cancel_open_orders":
+                if reference is not None:
+                    raise CommandError("cancel_open_orders does not accept order_id; use cancel_order")
+                if symbol is not None and broker != "bitget":
+                    raise CommandError("cancel_open_orders targets the configured account; omit symbol and order_id")
             if reference is not None:
                 result["order_id"] = reference
             if symbol is not None:

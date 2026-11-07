@@ -20,6 +20,12 @@ Command field mapping is based on the supplied [Zhuorui KTrader contract](https:
 | Tradability | `TEST_TRADABLE`, `tradability`, `CHECK_SYMBOL` | `symbol` |
 | Borrow availability | `QUERY_BORROW_AVAILABILITY`, `borrow_availability`, `SHORT_AVAILABILITY` | `symbol` |
 
+Bitget also accepts `symbol` on `CANCEL_OPEN_ORDERS`, as sent by Smart buying/selling.
+It cancels only matching US-stock orders in the configured account, after complete
+open-order discovery. Omitting `symbol` keeps the account-wide scope. An `order_id`
+requires `CANCEL_ORDER`. A cancellation acknowledgement is not a terminal result;
+the order-status feed confirms the eventual fill or cancellation.
+
 Kafka commands require `account_id` or `account_num_id`. `broker` and `server_id` may also restrict routing. All supplied selectors must match the selected config. Another target is ignored. A numeric routing ID in `account_id` is accepted, as in KTrader. Query controls can send the same account-addressed envelopes as trading controls.
 
 ```json
