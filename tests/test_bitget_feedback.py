@@ -59,6 +59,61 @@ def test_stale_rejection_survives_restart_and_never_replays(runner):
     runner.adapter.place_order.assert_not_called()
 
 
+@pytest.mark.parametrize('order_type,tif', [('LIMIT_ORDER', 'day'), ('LIMIT_ORDER_FOK', 'fok')])
+@pytest.mark.parametrize('timestamp_source', ['payload', 'kafka'])
+def test_order_expiring_during_action_delay_publishes_rejection(runner, monkeypatch, order_type, tif, timestamp_source):
+    clock = Mock(return_value=datetime.now(timezone.utc).timestamp())
+    issued_at = clock.return_value - 119
+    raw = payload(type=order_type, symbol='BDMD',
+                  ts=datetime.fromtimestamp(issued_at, timezone.utc).isoformat())
+    kafka_timestamp_ms = None
+    if timestamp_source == 'kafka':
+        raw.pop('ts')
+        kafka_timestamp_ms = int(issued_at * 1000)
+    runner.config.update(action_delay_seconds=5, command_max_age_seconds=120,
+                         fok_policy='timed_cancel', cancel_after_seconds=1)
+    runner.adapter.config.update(runner.config)
+
+    def advance(seconds):
+        clock.return_value += seconds
+
+    sleep = Mock(side_effect=advance)
+    request = Mock(side_effect=AssertionError('Must not contact the broker'))
+    monkeypatch.setattr('common.commands.time.time', clock)
+    monkeypatch.setattr('common.runner.time.sleep', sleep)
+    monkeypatch.setattr('requests.request', request)
+    result = runner.process(raw, kafka_timestamp_ms=kafka_timestamp_ms, require_account=True)
+    assert result['status'] == 'rejected'
+    assert result['submission_outcome'] == 'not_submitted' and result['requests_sent'] == 0
+    assert result['error_type'] == 'CommandError' and 'stale' in result['error']
+    assert runner.journal.unresolved(runner.scope) == [] and runner.unresolved_timed() == []
+
+    # The monitor reads a separate journal connection, including after restart.
+    other = Runner('bitget', runner.config, True, runner.journal_path)
+    try:
+        assert other.process(raw, kafka_timestamp_ms=kafka_timestamp_ms)['duplicate']
+        row, = feedback(other).rejections()
+        assert row['command_id'] == raw['command_id'] and row['symbol'] == 'BDMD'
+        assert row['status'] == 'REJECTED' and row['filled_quantity'] == 0
+        assert row['time_in_force'] == tif and 'Local validation' in row['message']
+    finally:
+        other.close()
+    sleep.assert_called_once_with(5)
+    runner.adapter.place_order.assert_not_called()
+    request.assert_not_called()
+
+
+def test_command_error_after_dispatch_is_not_proof_of_non_submission(runner):
+    raw = payload(ts=datetime.now(timezone.utc).isoformat())
+    runner.adapter.place_order.side_effect = CommandError('Failure after dispatch')
+    result = runner.process(raw)
+    assert result.get('submission_outcome') != 'not_submitted'
+    assert result.get('requests_sent') != 0
+    assert feedback(runner).rejections() == []
+    assert runner.process(raw)['duplicate']
+    runner.adapter.place_order.assert_called_once()
+
+
 def test_rejection_never_closes_unknown_or_conflicting_command(runner):
     raw = payload()
     command = normalize(raw, 'bitget', runner.config)

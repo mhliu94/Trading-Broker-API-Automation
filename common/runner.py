@@ -172,6 +172,7 @@ class Runner:
             cached = self.journal.reserve(self.scope, command)
             if cached is not None:
                 return {**cached, "duplicate": True}
+        dispatch_started = False
         try:
             if action in {"place_order", "cancel_order", "cancel_open_orders"}:
                 delay = float(self.config.get("action_delay_seconds", 0))
@@ -185,6 +186,7 @@ class Runner:
                 # SQLite reservation can wait behind another process. Recheck
                 # freshness immediately before dispatching a new submission.
                 validate_age(payload, kafka_timestamp_ms, float(self.config.get("command_max_age_seconds", 120)))
+                dispatch_started = True
                 if timed_plan and timed_plan["enabled"]:
                     from .timed_cancel import execute
                     data = execute(self.adapter, self.broker, command, self.journal, self.scope)
@@ -192,6 +194,7 @@ class Runner:
                     data = self.adapter.place_order(command)
             elif action in {"cancel_order", "cancel_open_orders"}:
                 from .cancellation import cancel_order, cancel_open_orders
+                dispatch_started = True
                 data = cancel_order(self.adapter, self.broker, command) if action == "cancel_order" else cancel_open_orders(self.adapter, self.broker, command)
             elif action == "set_trading_enabled":
                 data = {"trading_enabled": command["trading_enabled"]}
@@ -240,7 +243,11 @@ class Runner:
             result = {**base, "status": "rejected" if isinstance(exc, (CommandError, CancellationDiscoveryError)) else ("unknown" if mutation else "error"),
                       "error_type": type(exc).__name__,
                       "error": str(exc) if isinstance(exc, BrokerError) else "Broker operation failed; inspect local configuration and reconcile before retrying"}
-            if isinstance(exc, CancellationDiscoveryError):
+            # A command can expire after reservation or the action delay. Keep
+            # proof of zero dispatch so durable rejection feedback can publish.
+            # CommandError alone is not that proof once a broker operation starts.
+            if isinstance(exc, CancellationDiscoveryError) or (
+                    isinstance(exc, CommandError) and mutation and not dispatch_started):
                 result.update(submission_outcome="not_submitted", requests_sent=0)
             if isinstance(exc, RequestRejected) and mutation:
                 result.update(status="rejected", submission_outcome="not_submitted", requests_sent=exc.requests_sent,
