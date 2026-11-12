@@ -276,8 +276,12 @@ class SnapshotPublisher:
                     position[field] = _number(position[field], field, nullable=True, minimum=0 if field == "marketPrice" else None)
             positions.append(position)
         value["positions"] = positions
-        # The existing account-details topic expects an empty key, not null.
-        return self._send(self.account_topic, b"", value)
+        from .account_delta import AccountDeltaPublisher
+        with self._thread_lock:
+            if not hasattr(self, '_account_deltas'):
+                self._account_deltas = AccountDeltaPublisher()
+            return self._account_deltas.publish(value,
+                lambda event: self._send(self.account_topic, self.account.encode(), event))
 
     def _read(self, order_id):
         row = self.db.execute("SELECT published,pending FROM snapshot_publications WHERE account_id=? AND order_id=?", (self.account, order_id)).fetchone()

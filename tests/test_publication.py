@@ -63,7 +63,7 @@ def test_account_payload_empty_key_numeric_cash_and_basis_are_preserved(tmp_path
     # Extra fields must themselves already be plain JSON; canonical financial
     # fields get numeric normalization. Buying power is intentionally separate.
     assert result == {"topic": "account-details", "partition": 2, "offset": 1}
-    assert producer.sent[0][1] == b""
+    assert producer.sent[0][1] == ROUTING["account_id"].encode()
     value = producer.snapshots()[0]
     assert value["cash"] == 25.5 and value["cash_basis"] == "cash"
     assert value["positions"][0] == {"symbol": "AAPL", "qty": -3, "avg_price": None}

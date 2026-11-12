@@ -37,7 +37,7 @@ class StockMonitor:
         self.runner, self.adapter, self.publisher = runner, runner.adapter, publisher
         self.publisher.republish_on_restart = False
         self.settings = runner.config.get('monitor', {})
-        self.poll_seconds = self._seconds('poll_seconds', 1.2, .02, 30)
+        self.poll_seconds = min(1.0, self._seconds('poll_seconds', 1.0, .02, 30))
         self.burst_seconds = self._seconds('burst_seconds', 2, 0, 5)
         self.burst_poll_seconds = self._seconds('burst_poll_seconds', .25, .02, 30)
         self.account_seconds = self._seconds('account_seconds', 5, 1, 300)
@@ -213,7 +213,7 @@ class StockMonitor:
                 self.pending[identity] = snapshot
                 self.log.emit('monitor_order_observed', **metadata)
                 with self.lock:
-                    self.account_until = time.monotonic() + 3
+                    self.account_until = time.monotonic() + 10
                     self.account_trigger = observed_mono
                 self.account_wake.set()
                 result = self.publisher.publish_orders([snapshot])
