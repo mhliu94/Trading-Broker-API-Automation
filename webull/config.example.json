@@ -10,7 +10,7 @@
   "query_interval": 1.1,
   "max_query_pages": 10000,
   "fok_policy": "native",
-  "action_delay_seconds": 5,
+  "action_delay_seconds": 0,
   "lock_timeout_seconds": 30,
   "cancel_after_seconds": 1,
   "cancel_confirmation_delays_seconds": [

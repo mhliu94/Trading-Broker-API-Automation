@@ -20,7 +20,7 @@
       "asset_class": "us_equity",
       "timezone": "America/New_York",
       "fok_policy": "native",
-      "action_delay_seconds": 5,
+      "action_delay_seconds": 0,
       "lock_timeout_seconds": 30,
       "cancel_after_seconds": 1,
       "cancel_confirmation_delays_seconds": [
@@ -54,7 +54,7 @@
       "timezone": "America/New_York",
       "fok_policy": "native",
       "review_before_order": true,
-      "action_delay_seconds": 5,
+      "action_delay_seconds": 0,
       "lock_timeout_seconds": 30,
       "cancel_after_seconds": 1,
       "cancel_confirmation_delays_seconds": [
@@ -82,7 +82,7 @@
       "timeout": 20,
       "max_pages": 10000,
       "fok_policy": "native",
-      "action_delay_seconds": 5,
+      "action_delay_seconds": 0,
       "lock_timeout_seconds": 30,
       "cancel_after_seconds": 1,
       "cancel_confirmation_delays_seconds": [
@@ -110,7 +110,7 @@
       "timeout": 20,
       "max_pages": 10000,
       "fok_policy": "native",
-      "action_delay_seconds": 5,
+      "action_delay_seconds": 0,
       "lock_timeout_seconds": 30,
       "cancel_after_seconds": 1,
       "cancel_confirmation_delays_seconds": [
@@ -136,7 +136,7 @@
       "timezone": "America/New_York",
       "timeout": 20,
       "fok_policy": "native",
-      "action_delay_seconds": 5,
+      "action_delay_seconds": 0,
       "lock_timeout_seconds": 30,
       "cancel_after_seconds": 1,
       "cancel_confirmation_delays_seconds": [
@@ -165,7 +165,7 @@
       "query_interval": 1.1,
       "max_query_pages": 10000,
       "fok_policy": "native",
-      "action_delay_seconds": 5,
+      "action_delay_seconds": 0,
       "lock_timeout_seconds": 30,
       "cancel_after_seconds": 1,
       "cancel_confirmation_delays_seconds": [

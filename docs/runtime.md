@@ -12,7 +12,7 @@ Start one logical worker per configured broker account:
 
 The local account operation lock serializes CLI actions, worker actions and snapshot reads. A separate runner lock prevents two local workers from processing the same account concurrently. Preserve the command and publication databases. Independent machines with separate databases do not provide account-wide duplicate protection.
 
-The example configuration uses a five-second delay before each direct API order/cancellation, under the account operation lock. Queued delays accumulate. Zhuorui keeps its upstream five-second delay and does not add another. Set `action_delay_seconds` explicitly to adjust this. A fresh timestamp check runs after waiting, before dispatch.
+Pre-action delay logic remains configurable through `action_delay_seconds`, but all new account examples default to **0 seconds**. A nonzero override waits under the account operation lock; a fresh timestamp check runs afterwards before dispatch. Broker rate limiting and FOK/IOC cancellation windows are separate settings.
 
 The worker handles `MARKET_ORDER`, `LIMIT_ORDER`, `LIMIT_ORDER_FOK`, `CANCEL_ORDER`, `CANCEL_OPEN_ORDERS`, `SET_TRADING_ENABLED`, positions, today's orders, capabilities, tradability, and borrow availability. The legacy `ts` timestamp and boolean `cancel_unfilled` flag are recognized. Conflicting fields and aliases reject instead of silently changing an instruction.
 
