@@ -41,6 +41,20 @@ def test_regular_day_limit_is_offline_and_preserves_price():
     assert Adapter({}).capabilities()["luld_auction_participation"] is None
 
 
+@pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize("price", ["0.0910", "0.0911", "0.0001", "0.9999", "1.00"])
+def test_equity_price_bands_preserve_legal_subdollar_limits(side, price):
+    from decimal import Decimal
+    result = Adapter({}).build_order(command(side=side, limit_price=price))
+    assert Decimal(result["limit_price"]) == Decimal(price)
+
+
+@pytest.mark.parametrize("price", ["0.09115", "0.00001", "1.0001"])
+def test_off_tick_limits_are_rejected_without_changing_the_price(price):
+    with pytest.raises(UnsupportedOrder, match="tick-aligned"):
+        Adapter({}).build_order(command(limit_price=price))
+
+
 def test_market_is_not_silently_changed_to_extended_hours_limit():
     client = Mock()
     client.prepare_market_order.return_value = ("limit", 1, "101", True, {})

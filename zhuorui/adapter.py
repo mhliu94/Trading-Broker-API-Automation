@@ -12,7 +12,7 @@ from common.errors import AuthenticationError, BrokerError, ConfigurationError, 
 from common.equity_scope import require_us_equity, us_stock_symbol
 from common.utils import decimal_string, iso_utc
 
-PINNED_COMMIT = "002aa6866b246dbc4c1f5e1f647019abc170080d"
+PINNED_COMMIT = "52149ec52810a0872875f3860bbc0b3ed0cdaca9"
 
 
 class Adapter:
@@ -61,8 +61,10 @@ class Adapter:
         price = None
         if kind == "limit":
             price = decimal_string(command.get("limit_price"))
-            if Decimal(price) != Decimal(price).quantize(Decimal("0.01")):
-                raise UnsupportedOrder("Zhuorui upstream rounds limits to cents; supply a cent-aligned price to preserve your limit")
+            value = Decimal(price)
+            tick = Decimal("0.0001") if value < 1 else Decimal("0.01")
+            if value != value.quantize(tick):
+                raise UnsupportedOrder("Zhuorui requires a tick-aligned limit: 0.0001 below $1, or 0.01 at/above $1")
         elif command.get("limit_price") is not None:
             raise UnsupportedOrder("Zhuorui market orders must not have a limit_price")
         return {"command_id": command["id"], "symbol": symbol, "side": side,

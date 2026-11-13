@@ -4,7 +4,7 @@ Default bootstrap: `45.32.121.19:9092`; input topic: `trading-commands`. Configu
 
 The inspection tool assigns partitions directly, uses no consumer group, disables automatic commits, and reads bounded historical samples without creating topics. The server reported these topics: `account-details`, `actions`, `aggregate-status`, `client-requests`, `order-status`, `price-books`, `server-status`, `stock-quotes`, `trading-commands`, `trading-volume`. The three inspected command-related topics had no retained messages. Therefore no claim is made that live producer payloads were observed or end-to-end executions were verified.
 
-Command field mapping is based on the supplied [Zhuorui KTrader contract](https://github.com/mhliu94/Zhuorui-Securities-Automation/blob/002aa6866b246dbc4c1f5e1f647019abc170080d/docs/api.md#kafka-command-contract) and parser interfaces. We did not copy its implementation. The query actions below extend that contract for these new scripts.
+Command field mapping is based on the supplied [Zhuorui KTrader contract](https://github.com/mhliu94/Zhuorui-Securities-Automation/blob/52149ec52810a0872875f3860bbc0b3ed0cdaca9/docs/api.md#kafka-command-contract) and parser interfaces. We did not copy its implementation. The query actions below extend that contract for these new scripts.
 
 | Action | Accepted `type` / `action` examples | Required action fields |
 | --- | --- | --- |
