@@ -69,8 +69,10 @@ def test_ioc_command_aliases_preserve_limit_intent(kind):
     assert result["execution_plan"]["requested_time_in_force"] == "ioc"
     with pytest.raises(CommandError, match="conflicts"):
         Runner("bitget", config(), False).process({**request, "type": kind, "time_in_force": "day"})
+    canonical = Runner("bitget", config(), False).process({**request, "type": kind, "time_in_force": "IOC", "cancel_unfilled": True})
+    assert canonical["execution_plan"]["requested_time_in_force"] == "ioc"
     with pytest.raises(CommandError, match="conflicts"):
-        Runner("bitget", config(), False).process({**request, "type": kind, "cancel_unfilled": True})
+        Runner("bitget", config(), False).process({**request, "type": kind, "cancel_unfilled": False})
 
 
 @pytest.mark.parametrize("value", [-1, 301, True, None, "nan", "bad"])

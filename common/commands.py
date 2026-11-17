@@ -177,13 +177,12 @@ def normalize(payload, broker, config, message_id=None, require_account=False):
         if not isinstance(payload["cancel_unfilled"], bool):
             raise CommandError("cancel_unfilled must be a JSON boolean")
         if payload["cancel_unfilled"]:
-            if kind == "ioc":
-                raise CommandError("cancel_unfilled=true requests FOK and conflicts with the IOC order type")
             if kind == "market":
                 raise CommandError("cancel_unfilled requires a limit order")
-            kind = "fok"
-        elif kind == "fok":
-            raise CommandError("cancel_unfilled=false conflicts with the FOK order type")
+            if kind != "ioc":
+                kind = "fok"  # Historical flag-only spelling.
+        elif kind in {"fok", "ioc"}:
+            raise CommandError(f"cancel_unfilled=false conflicts with the {kind.upper()} order type")
     configured_asset = "us_equity"
     default_tif = config.get("default_time_in_force", "day")
     tif = alias(payload, ("time_in_force", "timeInForce", "tif"), token, kind if kind in {"fok", "ioc"} else default_tif)
