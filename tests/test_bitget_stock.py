@@ -108,7 +108,8 @@ def test_account_snapshot_uses_actual_usd_cash_and_signed_stock_shares():
     adapter.positions = Mock(return_value=[{"symbol": "AAPL.US", "quantity": "-3", "availableQuantity": "-2",
                                             "costPrice": "190.5", "accountChannel": "channel1", "currency": "USD"}])
     result = adapter.snapshot_account()
-    assert result["cash"] == 25.1 and result["available_cash_by_currency"] == {"USD": 20.2}
+    assert result["cash"] == 20.2
+    assert result["cash_by_currency"] == result["available_cash_by_currency"] == {"USD": 20.2}
     assert result["positions"] == [{"symbol": "AAPL", "qty": -3, "avg_price": 190.5, "available_qty": -2,
                                      "currency": "USD", "account_channel": "channel1"}]
 

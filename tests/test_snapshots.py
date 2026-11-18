@@ -38,7 +38,7 @@ def test_stockplus_account_snapshot_hook_preserves_stock_cash_and_positions():
     adapter.positions=Mock(return_value=[{"symbol":"AAPL.US","quantity":"2","costPrice":"100","availableQuantity":"1","accountChannel":"stock","currency":"USD"}])
     adapter._request=Mock(return_value={"list":[{"currency":"USD","totalCash":"42","cashInfos":[{"currency":"USD","availableCash":"30"}]}]})
     data=collect_account(adapter,"bitget")
-    assert data["cash"]==42 and data["positions"][0]["symbol"]=="AAPL"
+    assert data["cash"]==30 and data["positions"][0]["symbol"]=="AAPL"
     assert data["positions"][0]["qty"]==2
 
 

@@ -56,7 +56,7 @@ The reference account consumer requires numeric cash. Account mappings preserve 
 - Alpaca and TradeStation use reported cash balances.
 - Longbridge reports available native-currency cash with an explicit basis, preserving the broker's reported consolidated totals separately.
 - Webull uses per-currency cash balances.
-- Bitget Stock+ uses reported USD totalCash and separately reported available cash, with stock share positions.
+- Bitget Stock+ uses native USD cashInfos.availableCash for displayed cash and available cash, with stock share positions.
 - Robinhood Trading MCP uses reported portfolio cash (including any early access) and retains buying power separately. It no longer uses the crypto buying-power proxy.
 - Zhuorui reuses the verified snapshot mappings from the pinned external runtime and verifies account bindings before publication.
 

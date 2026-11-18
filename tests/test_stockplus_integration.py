@@ -127,7 +127,7 @@ def test_common_account_snapshot_uses_actual_stockplus_cash_and_stock_positions(
     adapter._request = Mock(side_effect=[{"list": [{"currency": "USD", "totalCash": "125.5", "cashInfos": [{"currency": "USD", "availableCash": "100"}]}]},
         {"channels": [{"accountChannel": "channel", "positions": [{"symbol": "AAPL.US", "currency": "USD", "quantity": "-3", "availableQuantity": "-3", "costPrice": "190"}]}]}])
     result = collect_account(adapter, "bitget")
-    assert result["cash"] == 125.5 and result["positions"][0]["symbol"] == "AAPL"
+    assert result["cash"] == 100 and result["positions"][0]["symbol"] == "AAPL"
     assert result["positions"][0]["qty"] == -3
     assert adapter._request.call_args_list[0].args[1] == PREFIX + "/asset/account"
 

@@ -592,7 +592,6 @@ class Adapter:
         if len(usd) != 1:
             raise BrokerError("Stock+ USD account balance is missing or ambiguous")
         account = usd[0]
-        cash = number(account.get("totalCash"), "cash")
         infos = self._list(account, "cashInfos")
         usd_infos = [row for row in infos if row.get("currency") == "USD"]
         if len(usd_infos) != 1:
@@ -605,8 +604,8 @@ class Adapter:
                            available_qty=number(row.get("availableQuantity"), "available quantity"),
                            currency="USD", account_channel=row["accountChannel"])
                   for row in stock_positions]
-        return {"cash": cash, "cash_by_currency": {"USD": cash}, "available_cash_by_currency": {"USD": available},
-                "cash_basis": "Stock+ totalCash USD", "positions": mapped}
+        return {"cash": available, "cash_by_currency": {"USD": available}, "available_cash_by_currency": {"USD": available},
+                "cash_basis": "Stock+ cashInfos.availableCash USD", "positions": mapped}
 
     def snapshot_order(self, row, observed_at):
         from common.snapshots import base_order, number
