@@ -79,7 +79,7 @@ positions refresh independently every five seconds, immediately after an order
 change subject to a one-second minimum spacing, then once per second for three
 seconds. A broader today/history reconciliation runs every 60 seconds to catch
 orders that were created and completed between polls, including manual orders.
-History sweeps overlap across midnight. Discovery of older active orders uses
+After initial discovery, history sweeps request only the interval since the previous successful read, with a one-second overlap across midnight. Discovery of older active orders uses
 the same nonterminal status filters every 300 seconds. These slower checks and
 startup preflight can include terminal orders; the frequent polling loop filters
 for active orders. Missing active orders are queried individually,

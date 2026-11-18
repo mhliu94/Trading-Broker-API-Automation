@@ -371,22 +371,22 @@ class StockMonitor:
         next_discovery = 0.0
         # Overlap the previous sweep across midnight. A quick order can reach
         # terminal state between active polls and must still be published.
-        history_start = today_window(self.runner.config.get('timezone', 'America/New_York'))[0]
+        history_start = int(time.time())
         while not self.stop_event.is_set():
             try:
                 if time.monotonic() >= next_discovery:
-                    rows = self.adapter._history(0, int(time.time()), statuses=ACTIVE)
+                    # Discover older working GTCs and fast completions from the
+                    # current-day endpoint. The frequent poll remains active/ID-only.
+                    rows = self.adapter._merge_orders(
+                        self.adapter._history(0, int(time.time()), statuses=ACTIVE), self.adapter._today())
                     source = 'discovery'
                     next_discovery = time.monotonic() + self.discovery_seconds
                 else:
-                    start, end = today_window(self.runner.config.get('timezone', 'America/New_York'))
-                    # Today's endpoint catches fast completions too; history
-                    # covers the preceding day when a sweep crosses midnight.
-                    rows = self.adapter._merge_orders(
-                        self.adapter._today(),
-                        self.adapter._history(math.floor(min(start, history_start).timestamp()),
-                                              math.ceil(end.timestamp()) - 1))
-                    history_start = start
+                    # Poll exact missing tickets on the fast loop. The background sweep
+                    # discovers newly created tickets since the previous successful read.
+                    end = int(time.time())
+                    rows = self.adapter._history(max(0, min(history_start, end) - 1), end)
+                    history_start = end
                     source = 'history'
                 batch = (rows, source, datetime.now(timezone.utc), time.monotonic())
                 while not self.stop_event.is_set():

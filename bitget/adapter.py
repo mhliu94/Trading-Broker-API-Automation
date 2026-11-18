@@ -5,6 +5,7 @@ The local journal protects command replay. A remark is correlation, not idempote
 """
 from __future__ import annotations
 
+from common import latency
 import base64
 from collections import deque
 from contextlib import contextmanager
@@ -264,6 +265,7 @@ class Adapter:
                 except Exception:
                     print(json.dumps({'event': 'monitor_telemetry_error', 'component': 'request'}), flush=True)
 
+    @latency.timed("broker_request", "_raw_request", arg=2)
     def _raw_request(self, method: str, path: str, params=None, payload=None):
         import requests
 
@@ -494,8 +496,8 @@ class Adapter:
         # No date cutoff: preserve older GTC orders. The broker may reject a
         # historical range outside retention; propagate that instead of claiming
         # a complete cancellation set from a shorter successful query.
-        today = self._today()
-        history = self._history(0, int(time.time()))
+        today = self._today(statuses=ACTIVE)
+        history = self._history(0, int(time.time()), statuses=ACTIVE)
         return [row for row in self._merge_orders(today, history) if row["status"] in ACTIVE]
 
     def stock_order_detail(self, order_id):

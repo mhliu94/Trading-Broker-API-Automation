@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+from common import latency
 import json
 import math
 import time
@@ -216,11 +218,16 @@ def _consume(runner, config, max_messages=0):
             batches=consumer.poll(timeout_ms=1000,max_records=1)
             for records in batches.values():
                 for record in records:
+                    received_ms = latency.now_ms()
                     identity = f"{record.topic}:{record.partition}:{record.offset}"
                     payload = None
                     try:
                         payload = decode_command(record.value)
-                        result = runner.process(payload, identity, record.timestamp, require_account=True)
+                        matched = isinstance(payload, dict) and payload.get("account_id") == runner.config.get("routing", {}).get("account_id")
+                        if matched:
+                            latency.received(payload, record, received_ms)
+                        with latency.span("command_execution", "process", payload) if matched else nullcontext():
+                            result = runner.process(payload, identity, record.timestamp, require_account=True)
                     except BrokerError as exc:
                         result = {"status": "rejected", "broker": runner.broker, "message_id": identity,
                                   "error_type": type(exc).__name__, "error": str(exc)}

@@ -121,22 +121,23 @@ def test_periodic_sweep_discovers_order_that_completed_between_active_polls(moni
 
 
 def test_reconciliation_keeps_previous_day_across_midnight(monitor, monkeypatch):
-    before = datetime(2026, 11, 5, 5, tzinfo=timezone.utc)
-    after = before + timedelta(days=1)
-    windows = iter([(before, after), (after, after + timedelta(days=1))])
-    monkeypatch.setattr('bitget.monitor.today_window', lambda _: next(windows))
+    before = datetime(2026, 11, 6, 4, 59, 58, tzinfo=timezone.utc)
+    after = before + timedelta(seconds=60)
+    wall = [before.timestamp()]
+    monkeypatch.setattr("bitget.monitor.time.time", lambda: wall[0])
     monitor.adapter._history = Mock(return_value=[])
     monitor.adapter._today = Mock(return_value=[])
     waits = []
     def wait(_):
         waits.append(1)
+        wall[0] = after.timestamp()
         if len(waits) == 2:
             monitor.stop_event.set()
         return False
     monitor.stop_event.wait = wait
     monitor._reconcile()
     assert monitor.adapter._history.call_args.args == (
-        int(before.timestamp()), int((after + timedelta(days=1)).timestamp()) - 1)
+        int(before.timestamp()) - 1, int(after.timestamp()))
 
 
 def test_unchanged_order_not_republished_after_restart_but_pending_delivery_retries(tmp_path):

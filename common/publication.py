@@ -4,6 +4,7 @@ The broker mappers supply full canonical snapshots. This module never guesses a
 broker state, fill, balance or timestamp. Keep this database across restarts; it
 contains publication sequences, separately from the financial command journal.
 """
+from common import latency
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -312,6 +313,7 @@ class SnapshotPublisher:
         with self.db:
             self.db.execute("INSERT INTO snapshot_publications(account_id,order_id,pending) VALUES (?,?,?) ON CONFLICT(account_id,order_id) DO UPDATE SET pending=excluded.pending", (self.account, snapshot["order_id"], _json(snapshot)))
 
+    @latency.timed("report_delivery", "order_status", payload=1)
     def _deliver(self, snapshot):
         key = json.dumps([self.account, snapshot["order_id"]], separators=(",", ":")).encode()
         acknowledgement = self._send(self.order_topic, key, snapshot)

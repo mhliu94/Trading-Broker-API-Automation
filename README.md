@@ -88,3 +88,13 @@ Live workers publish `account-details` and KTrader v1 `order-status` snapshots a
 Add `--execute` deliberately to perform mutation/recovery commands. [Runtime operations](docs/runtime.md) explain process control, persistent state, startup recovery and authentication boundaries. Installing the repository alone does not start a worker; the Bitget deployment instructions describe the explicitly started service.
 
 [Verification evidence](docs/verification.md) records the tests and their limits. Public API documentation and mocked contract tests were checked; authenticated order acceptance, account permissions, fills and auction routing remain untested without your actual account connection. No trades were placed. The last read-only Kafka inspection found both snapshot topics present and `trading-commands` empty at partition 0 (`begin=end=9238`); the legacy command shape follows the supplied reference repositories.
+
+### Worker latency
+
+The listener emits JSON events named `broker_latency` to its service log.
+`command_received` records the Kafka timestamp, worker pickup timestamp and
+their difference in milliseconds. `command_execution`, `broker_request` and
+`report_delivery` record UTC Unix start/end milliseconds and monotonic
+`elapsed_ms`. A short hash of the command ID links related events. Broker
+timestamps retain their original precision. Pickup comparisons across hosts
+include any difference between their clocks.

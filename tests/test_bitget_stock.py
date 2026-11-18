@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 import pytest
 
-from bitget.adapter import Adapter, PREFIX
+from bitget.adapter import ACTIVE, Adapter, PREFIX
 from common.errors import BrokerError, OutcomeUnknown, UnsupportedOrder
 from common.publication import validate_order_snapshot
 
@@ -41,14 +41,14 @@ def test_positions_fail_on_missing_channel_or_list():
             adapter.positions()
 
 
-def test_open_orders_include_old_gtc_from_full_available_history():
+def test_open_order_discovery_includes_old_gtc_with_a_working_status_filter():
     adapter = Adapter({})
     old = row(orderId="old", submittedAt="2025-01-01T14:00:00Z", updatedAt="2025-01-01T14:00:00Z", timeInForce="GoodTilCanceled")
     adapter._request = Mock(side_effect=[{"orders": [row()]}, {"hasMore": False, "orders": [old, row(status="Filled")]}])
     with patch("time.time", return_value=1000):
         result = adapter.open_stock_orders()
     assert [order["orderId"] for order in result] == ["old"]
-    assert adapter._request.call_args.args[2] == {"market": "US", "startAt": 0, "endAt": 1000}
+    assert adapter._request.call_args.args[2] == {"market": "US", "startAt": 0, "endAt": 1000, "status": sorted(ACTIVE)}
 
 
 def test_unknown_order_status_does_not_silently_disappear_from_cancel_scope():
