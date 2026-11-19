@@ -95,7 +95,7 @@ class TradeRateLimiter:
         except (ValueError, TypeError):
             seconds = self.window
         with self._state() as state:
-            state['cooldown'] = max(state['cooldown'], time.monotonic() + max(1, min(seconds, 300)))
+            state['cooldown'] = max(state['cooldown'], time.monotonic() + max(self.spacing, seconds))
 
     def wait_cooldown(self, stop=None):
         """Asset/quote reads respect a 429 without spending the trade quota."""

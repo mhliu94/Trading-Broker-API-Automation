@@ -91,8 +91,18 @@ minimum spacing (checked 2026-11-05). All trade calls in this implementation sha
 that conservative budget. Monitoring leaves five slots for command requests;
 history queries briefly defer to live polls without indefinite starvation. The quota file coordinates local processes
 using the same account label and survives process restarts. Other hosts or clients
-can still consume the broker's UID quota. HTTP 429 responses establish a shared
-cooldown; no financial write is automatically retried. Workers use separate
+can still consume the broker's UID quota. HTTP 429 and explicit Bitget rate-limit
+codes `429` and `101108` establish a shared cooldown. Reads retry up to three
+times with backoff of 0.25, 0.5 and 1 second. A rate-limited exact-ticket cancel
+can retry after a definite broker refusal. Each retry first reads that ticket
+and skips the write if it is already terminal or awaiting cancellation.
+New-order submissions and ambiguous cancellation writes retain their journal
+reconciliation behavior. A numeric or HTTP-date `Retry-After` takes precedence
+when longer. Without a header, HTTP 429 uses the 30-second quota window and
+`101108` uses a 0.25-second minimum. A broker wait above 60 seconds ends the
+inline retry and leaves the account cooldown in effect. Set the Bitget config
+field `rate_limit_retry_delays_seconds` to a list of up to eight backoff delays,
+or `[]` to disable automatic retries. Workers use separate
 persistent HTTP sessions and finite request timeouts.
 
 There is no documented Stock+ order WebSocket in the sources checked. The UTA

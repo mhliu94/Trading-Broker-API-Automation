@@ -12,7 +12,7 @@ from common.consumer import consume
 from common.errors import OutcomeUnknown, RequestRejected
 from common.runner import Runner
 from common import timed_cancel
-from test_bitget import command, instrument
+from test_bitget import command, instrument, order
 
 
 def response(status=400, code="40017", msg="Overnight market orders are not supported", **extra):
@@ -36,6 +36,65 @@ def runner(tmp_path):
 
 def payload(identity="rejected-1", **updates):
     return command(id=identity, account_id="TEST", **updates)
+
+
+def test_cancel_recovers_rate_limited_detail_then_sends_one_exact_write(runner):
+    throttle = response(400, "101108", "minimum interval between calls")
+    throttle.headers = {"Retry-After": "2"}
+    ok = lambda data: response(200, "00000", "success", data=data)
+    with patch("time.sleep") as sleep, patch("requests.request", side_effect=[
+            throttle, ok(order()), ok(order()), ok({"orderId": "001"})]) as request:
+        result = runner.process({"id":"retry-cancel", "account_id":"TEST", "action":"cancel_order",
+                                 "order_id":"001", "symbol":"AAPL"})
+    assert result["status"] == "cancel_requested"
+    assert [c.args[0] for c in request.call_args_list] == ["GET", "GET", "GET", "POST"]
+    assert json.loads(request.call_args.kwargs["data"]) == {"symbol":"AAPL.US", "orderId":"001"}
+    sleep.assert_any_call(2)
+
+
+@pytest.mark.parametrize("state,posts", [("New", 2), ("Filled", 1), ("PendingCancel", 1)])
+def test_rate_limited_cancel_rechecks_ticket_before_retry(runner, state, posts):
+    ok = lambda data: response(200, "00000", "success", data=data)
+    replies = [ok(order()), response(400, "101108", "too fast"), ok(order(status=state))]
+    if posts == 2:
+        replies.append(ok({"orderId": "001"}))
+    with patch("time.sleep"), patch("requests.request", side_effect=replies) as request:
+        result = runner.adapter.cancel_stock_order("001", symbol="AAPL")
+    assert result["orderId"] == "001"
+    assert [c.args[0] for c in request.call_args_list] == ["GET", "POST", "GET"] + (["POST"] if posts==2 else [])
+    writes = [json.loads(c.kwargs["data"]) for c in request.call_args_list if c.args[0]=="POST"]
+    assert writes == [{"symbol":"AAPL.US","orderId":"001"}] * posts
+
+
+def test_rate_limited_read_exhaustion_and_ambiguous_cancel(runner):
+    with patch("time.sleep"), patch("requests.request", return_value=response(400,"101108","too fast")) as request:
+        with pytest.raises(RequestRejected) as exc:
+            runner.adapter.stock_order_detail("001")
+        assert exc.value.code=="101108" and request.call_count==4
+    with patch("requests.request", side_effect=[response(200,"00000",data=order()), requests.Timeout]) as request:
+        with pytest.raises(OutcomeUnknown):
+            runner.adapter.cancel_stock_order("001")
+        assert [c.args[0] for c in request.call_args_list] == ["GET","POST"]
+
+
+def test_unstructured_http_429_retries_read_but_not_cancel(runner):
+    busy = Mock(status_code=429, headers={"Retry-After":"1"})
+    busy.json.side_effect = ValueError("no JSON")
+    ok = response(200, "00000", "success", data=order())
+    with patch("time.sleep") as sleep, patch("requests.request", side_effect=[busy, ok, busy]) as request:
+        with pytest.raises(OutcomeUnknown):
+            runner.adapter.cancel_stock_order("001")
+    assert [c.args[0] for c in request.call_args_list] == ["GET","GET","POST"]
+    sleep.assert_any_call(1)
+
+
+def test_long_broker_wait_ends_inline_retry(runner):
+    busy = response(429, "429", "Too many requests")
+    busy.headers = {"Retry-After":"90"}
+    with patch("requests.request", return_value=busy) as request:
+        with pytest.raises(RequestRejected):
+            runner.adapter.stock_order_detail("001")
+    assert request.call_count == 1
 
 
 @pytest.mark.parametrize("status,code", [(400, "40017"), (200, "40017"), (200, "25202"), (429, "429")])

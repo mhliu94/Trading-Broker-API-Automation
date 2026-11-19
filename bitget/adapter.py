@@ -11,6 +11,7 @@ from collections import deque
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from email.utils import parsedate_to_datetime
 import hashlib
 import hmac
 import json
@@ -31,7 +32,7 @@ AUTH_ERROR_CODES = {"40001", "40002", "40003", "40006", "40009", "40011", "40012
                     "40039", "40040", "40041", "40065", "40084"}
 # Bitget explicitly requires reconciliation for these errors, even if HTTP 400.
 UNCERTAIN_ERROR_CODES = {"40010", "40725", "45001", "25000", "25001"}
-REJECTION_CODES = {"429", "25002", "25004", "25012", "25013", "25100", "25101", "25102", "25104", "25105",
+REJECTION_CODES = {"429", "101108", "25002", "25004", "25012", "25013", "25100", "25101", "25102", "25104", "25105",
                    "25200", "25201", "25202", "25203", "25204", "25205", "25206", "25207", "25208", "25209",
                    "25210", "25211", "25213", "25214", "25215", "25216", "25225", "25226", "25227", "25229", "25230",
                    "40017", "40019", "40020", "40034", "40053", "40057", "40058", "40059", "40064", "40102",
@@ -42,6 +43,29 @@ TERMINAL = {"Filled", "Rejected", "Canceled", "Expired", "PartialWithdrawal"}
 ACTIVE = {"NotReported", "ReplacedNotReported", "ProtectedNotReported", "VarietiesNotReported",
           "WaitToNew", "New", "WaitToReplace", "PendingReplace", "Replaced", "PartialFilled",
           "WaitToCancel", "PendingCancel"}
+
+
+class _RateLimited(BrokerError):
+    """Internal retry signal. Preserve the original broker classification on exhaustion."""
+
+    def __init__(self, error, delay):
+        super().__init__(str(error))
+        self.error = error
+        self.delay = delay
+
+
+def _retry_after(value, fallback):
+    if isinstance(value, str):
+        try:
+            seconds = float(value)
+        except ValueError:
+            try:
+                seconds = parsedate_to_datetime(value).timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError, OSError):
+                return fallback
+        if math.isfinite(seconds):
+            return max(0, seconds)
+    return fallback
 
 
 class Adapter:
@@ -61,6 +85,11 @@ class Adapter:
             raise ConfigurationError("Bitget adapter supports US stocks only") from exc
         self._trade_times = deque()
         self._request_context = threading.local()
+        self._retry_delays = self.config.get("rate_limit_retry_delays_seconds", [0.25, 0.5, 1.0])
+        if (not isinstance(self._retry_delays, list) or len(self._retry_delays) > 8 or
+                any(type(delay) not in (int, float) or not math.isfinite(delay) or not 0 < delay <= 60
+                    for delay in self._retry_delays)):
+            raise ConfigurationError("rate_limit_retry_delays_seconds must contain at most eight positive delays of up to 60 seconds")
         self.request_observer = None
         self._limiter = None
         monitor = self.config.get("monitor", {})
@@ -227,6 +256,31 @@ class Adapter:
             self._request_context.stop = None
 
     def _request(self, method: str, path: str, params=None, payload=None):
+        for attempt in range(len(self._retry_delays) + 1):
+            try:
+                return self._request_once(method, path, params, payload)
+            except _RateLimited as limited:
+                if attempt == len(self._retry_delays) or limited.delay > 60:
+                    raise limited.error from None
+                delay = max(self._retry_delays[attempt], limited.delay)
+                print(json.dumps({"event": "bitget_rate_limit_retry", "endpoint": path, "method": method,
+                                  "retry": attempt + 1, "delay_seconds": delay}), flush=True)
+            stop = getattr(self._request_context, "stop", None)
+            if stop is None:
+                time.sleep(delay)
+            elif stop.wait(delay):
+                from bitget.rate_limit import MonitorStopped
+                raise MonitorStopped("Stock+ monitor stopped")
+            # Only a definitively rejected exact-ticket cancel can reach this branch.
+            if method == "POST":
+                row = self.stock_order_detail(payload["orderId"])
+                if row["symbol"] != payload["symbol"]:
+                    raise BrokerError("Stock+ cancel retry symbol differs from the original ticket")
+                if row["status"] in TERMINAL or row["status"] in {"WaitToCancel", "PendingCancel"}:
+                    return {"orderId": row["orderId"], "symbol": row["symbol"], "status": row["status"],
+                            "cancel_requested": False, "already_terminal": row["status"] in TERMINAL}
+
+    def _request_once(self, method: str, path: str, params=None, payload=None):
         if self._limiter is None:
             return self._raw_request(method, path, params, payload)
         from bitget.rate_limit import MonitorStopped
@@ -327,13 +381,24 @@ class Adapter:
             result = response.json()
         except ValueError:
             result = None
+        code = str(result.get('code')) if isinstance(result, dict) else None
         if self._limiter is not None:
             self._request_context.http_status = response.status_code
-            self._request_context.broker_code = str(result.get('code')) if isinstance(result, dict) else None
-            if response.status_code == 429 or self._request_context.broker_code == '429':
-                self._limiter.throttle(response.headers.get('Retry-After'))
+            self._request_context.broker_code = code
         if not 200 <= response.status_code < 300 or not isinstance(result, dict) or str(result.get("code")) != "00000":
-            raise self._response_error(response.status_code, result)
+            error = self._response_error(response.status_code, result)
+            explicit_limit = (isinstance(error, RequestRejected)
+                              and (response.status_code == 429 or code in {"101108", "429"}))
+            if response.status_code == 429 or explicit_limit:
+                fallback = 0.25 if code == "101108" else 30.0
+                delay = _retry_after(response.headers.get("Retry-After"), fallback)
+                if self._limiter is not None:
+                    self._limiter.throttle(delay)
+                exact_cancel = (method == "POST" and path == PREFIX + "/trade/cancel-order" and explicit_limit
+                                and isinstance(payload, dict) and payload.get("orderId") and payload.get("symbol"))
+                if (method == "GET" and not isinstance(error, AuthenticationError)) or exact_cancel:
+                    raise _RateLimited(error, delay)
+            raise error
         if "data" not in result:
             raise BrokerError("Bitget response omitted data")
         return result["data"]
