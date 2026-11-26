@@ -49,6 +49,7 @@ def _consume(runner, config, max_messages=0):
     reporter = None
     monitor = None
     monitor_failed = False
+    foreign_checkpoint = {}
     monitor_enabled = runner.broker == 'bitget' and runner.config.get('monitor', {}).get('enabled', False)
     snapshots_enabled = runner.execute and settings.get("publish_snapshots", True)
     if runner.execute and monitor_enabled and not snapshots_enabled:
@@ -241,14 +242,25 @@ def _consume(runner, config, max_messages=0):
                         authentication_required=stopped=True
                         if health:health.update(status="authentication_required",last_result=result)
                         return
+                    # The command result and exact broker ticket have already been
+                    # journaled. Let the independent order monitor start its lookup now.
+                    if monitor:
+                        try:
+                            monitor.notify(result)
+                        except Exception as exc:
+                            print(encoded({"event": "monitor_notify_failed", "error_type": type(exc).__name__}), flush=True)
                     if producer and result_topic and result["status"] != "ignored":
                         producer.send(result_topic, key=identity.encode(), value=output).get(timeout=30)
                     # Commit only this record; a snapshot delivery failure below
                     # never replays a financial command or rolls back its journal.
                     tp = TopicPartition(record.topic, record.partition)
-                    consumer.commit({tp: OffsetAndMetadata(record.offset + 1, "", -1)})
-                    if monitor:
-                        monitor.notify(result)
+                    foreign = (isinstance(payload, dict) and payload.get("account_id")
+                               and payload["account_id"] != runner.config.get("routing", {}).get("account_id")
+                               and result["status"] == "ignored")
+                    if not foreign or time.monotonic() >= foreign_checkpoint.get(tp, 0):
+                        consumer.commit({tp: OffsetAndMetadata(record.offset + 1, "", -1)})
+                        if foreign:
+                            foreign_checkpoint[tp] = time.monotonic() + 1
                     action=result.get("action")
                     if reporter and action in {"place_order","cancel_order","cancel_open_orders","set_trading_enabled","positions","orders_today"}:
                         if action in {"place_order","cancel_order","cancel_open_orders"} and post_delay:

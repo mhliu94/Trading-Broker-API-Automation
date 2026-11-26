@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from common import latency
 import base64
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -73,6 +73,10 @@ class Adapter:
 
     def __init__(self, config: dict):
         self.config = dict(config)
+        self._listing_ttl = float(self.config.get("instrument_identity_cache_seconds", 30))
+        if not math.isfinite(self._listing_ttl) or not 0 <= self._listing_ttl <= 60:
+            raise ConfigurationError("instrument_identity_cache_seconds must be between 0 and 60")
+        self._verified_listings = threading.local()
         self.base_url = self.config.get("base_url", "https://api.bitget.com").rstrip("/")
         parsed = urlsplit(self.base_url)
         if parsed.scheme != "https" or not parsed.netloc or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
@@ -453,10 +457,31 @@ class Adapter:
             raise UnsupportedOrder("Stock+ instrument is not a verified US stock board in USD")
         return row
 
+    def _verified_stock(self, symbol):
+        # Cache only positive board/currency identity. Quotes, trade status,
+        # broker acceptance and all per-order checks still have their own source.
+        now = time.monotonic()
+        day = datetime.now(ZoneInfo("America/New_York")).date()
+        cache = getattr(self._verified_listings, "cache", None)
+        if cache is None:
+            cache = self._verified_listings.cache = OrderedDict()
+        expires, trading_day = cache.get(symbol, (0, None))
+        if now < expires and day == trading_day:
+            cache.move_to_end(symbol)
+            return True
+        cache.pop(symbol, None)
+        if self._stock_instrument(symbol) is None:
+            return False
+        if self._listing_ttl:
+            cache[symbol] = (now + self._listing_ttl, day)
+            if len(cache) > 64:
+                cache.popitem(last=False)
+        return True
+
     def place_order(self, command: dict):
         payload = self.build_order(command)
         try:
-            if self._stock_instrument(payload["symbol"]) is None:
+            if not self._verified_stock(payload["symbol"]):
                 raise UnsupportedOrder("Stock+ did not return the requested US stock instrument")
         except AuthenticationError:
             raise

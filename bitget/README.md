@@ -287,3 +287,12 @@ tail -n 50 ~/bitget-configs/bitget.log
 # To stop after the current operation:
 ~/broker-api-scripts/.venv/bin/python ~/broker-api-scripts/tools/runner_control.py stop --broker bitget
 ```
+
+### Burst intake
+
+The consumer wakes the exact-ticket monitor after the durable broker outcome, ahead of result
+delivery and offset confirmation. Foreign-account no-op checkpoints are coalesced per
+partition. Positive US-board/USD instrument identity is cached per command thread and
+Eastern trading date for 30 seconds. Set `instrument_identity_cache_seconds` to 0 to
+verify every order, or choose a value up to 60. Explicit tradability checks still fetch
+current data. Errors and negative lookups are retried on the next request.

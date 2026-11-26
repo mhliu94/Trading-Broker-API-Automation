@@ -336,7 +336,7 @@ def test_summary_excludes_recovery_and_reports_percentiles(monitor):
                      'max': 1200, 'under_1000ms_pct': 75.0}
 
 
-def test_consumer_starts_monitor_not_blocking_snapshots_and_commits_before_wakeup(monkeypatch, tmp_path):
+def test_consumer_wakes_ticket_monitor_before_waiting_for_offset_commit(monkeypatch, tmp_path):
     from test_consumer_runtime import setup
     from common.consumer import consume
     runner, config, consumer, producer, publisher, calls = setup(monkeypatch, tmp_path)
@@ -350,7 +350,7 @@ def test_consumer_starts_monitor_not_blocking_snapshots_and_commits_before_wakeu
     publisher.close.side_effect = lambda: calls.append('publisher_close')
     monkeypatch.setattr('bitget.monitor.StockMonitor', Mock(return_value=worker))
     consume(runner, config, max_messages=1)
-    assert calls == ['monitor_start', 'poll', 'poll', 'execute', 'commit', 'monitor_wakeup',
+    assert calls == ['monitor_start', 'poll', 'poll', 'execute', 'monitor_wakeup', 'commit',
                      'monitor_close', 'publisher_close']
     assert publisher.allow_prior_orders is True
 

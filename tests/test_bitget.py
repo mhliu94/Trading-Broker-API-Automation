@@ -271,3 +271,20 @@ def test_trade_requests_are_locally_paced_to_stockplus_quota():
         adapter._request("GET", PREFIX + "/trade/today-orders", {"market": "US"})
     sleep.assert_called_once_with(29.0)
     assert list(adapter._trade_times) == [30.0]
+
+def test_listing_identity_cache_never_reuses_an_error_and_expires(monkeypatch):
+    from bitget.adapter import Adapter
+    from unittest.mock import Mock
+    adapter = Adapter.__new__(Adapter)
+    import threading
+    adapter._verified_listings = threading.local()
+    adapter._listing_ttl = 30
+    clock = [12.0]
+    monkeypatch.setattr("bitget.adapter.time.monotonic", lambda: clock[0])
+    adapter._stock_instrument = Mock(side_effect=[None, {"symbol": "AEHL.US"}, None])
+    assert not adapter._verified_stock("AEHL.US")
+    assert adapter._verified_stock("AEHL.US")
+    assert adapter._verified_stock("AEHL.US")
+    assert adapter._stock_instrument.call_count == 2
+    clock[0] += 31
+    assert not adapter._verified_stock("AEHL.US")
