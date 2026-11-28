@@ -58,10 +58,9 @@ def _consume(runner, config, max_messages=0):
     account_topic = settings.get("account_topic", "account-details")
     order_topic = settings.get("order_topic", "order-status")
     interval = float(settings.get("snapshot_interval_seconds", 30))
-    post_delay = float(settings.get("post_action_delay_seconds", 2))
-    if not math.isfinite(interval) or interval <= 0 or not math.isfinite(post_delay) or not 0 <= post_delay <= 300:
+    if not math.isfinite(interval) or interval <= 0:
         consumer.close()
-        raise ConfigurationError("Snapshot interval must be positive; post-action delay must be 0..300 seconds")
+        raise ConfigurationError("Snapshot interval must be positive")
     if runner.execute and (result_topic or snapshots_enabled):
         if result_topic in {topic, order_topic, account_topic}:
             consumer.close()
@@ -100,7 +99,6 @@ def _consume(runner, config, max_messages=0):
         else:
             reporter = RuntimeSnapshots(runner,publisher)
     processed = 0
-    next_refresh = time.monotonic()
     stopped = False
     authentication_required = False
     reconciliation_required = False
@@ -123,18 +121,11 @@ def _consume(runner, config, max_messages=0):
     if threading.current_thread() is threading.main_thread():
         for signum in (signal.SIGINT,signal.SIGTERM):
             old_handlers[signum]=signal.signal(signum,stop)
-    def refresh(trigger, command_id=None):
-        nonlocal next_refresh,authentication_required,stopped
-        try:
-            report=reporter.refresh(trigger,command_id)
-            print(encoded(report),flush=True)
-            if any(error.get("error_type")=="AuthenticationError" for error in report.get("errors",[])):
-                authentication_required=stopped=True
-            if health:health.update(last_refresh=report)
-        except BrokerError as exc:
-            print(encoded({"event":"snapshot_refresh","trigger":trigger,"error":str(exc)}),flush=True)
-        finally:
-            next_refresh = time.monotonic() + interval
+    def reporting_error(exc):
+        nonlocal authentication_required, stopped
+        print(encoded({"event":"snapshot_refresh_failed","error_type":type(exc).__name__}),flush=True)
+        if type(exc).__name__=="AuthenticationError":
+            authentication_required=stopped=True
 
     def reconcile():
         nonlocal reconciliation_required, next_reconciliation, reconciliation_attempts
@@ -159,8 +150,6 @@ def _consume(runner, config, max_messages=0):
         if reconciliation_required or report.get("resolved") or authentication_required:
             print(encoded({"event": "order_reconciliation", "attempt": attempt,
                            "next_check_seconds": delay, "retry_exhausted": retry_exhausted, **report}), flush=True)
-            if report.get("resolved") and reporter:
-                refresh("reconciliation")
         if health:
             health.update(status="authentication_required" if authentication_required else "running",
                           reconciliation={"attempt": attempt, "next_check_seconds": delay,
@@ -189,7 +178,6 @@ def _consume(runner, config, max_messages=0):
                 else:
                     reconciliation_required = True
                 stopped = stopped or authentication_required or not automatic_reconciliation
-        if reporter:refresh("startup")
         if isinstance(getattr(runner,"journal",None),Journal) and runner.journal.unresolved(runner.scope):
             reconciliation_required = True
             stopped = stopped or not automatic_reconciliation
@@ -198,6 +186,8 @@ def _consume(runner, config, max_messages=0):
         if health:health.update(status="authentication_required" if authentication_required else "running")
         if automatic_reconciliation and reconciliation_required:
             schedule_reconciliation()
+        if reporter and not stopped:
+            reporter.start(interval, reporting_error)
         next_monitor_health = 0.0
         while not stopped:
             if health and health.should_stop():break
@@ -213,7 +203,6 @@ def _consume(runner, config, max_messages=0):
                 if health and time.monotonic() >= next_monitor_health:
                     health.update(monitor=monitor.snapshot())
                     next_monitor_health = time.monotonic() + 5
-            if reporter and time.monotonic()>=next_refresh:refresh("periodic")
             if stopped:break
             batches=consumer.poll(timeout_ms=1000,max_records=1)
             for records in batches.values():
@@ -249,11 +238,6 @@ def _consume(runner, config, max_messages=0):
                     consumer.commit({tp: OffsetAndMetadata(record.offset + 1, "", -1)})
                     if monitor:
                         monitor.notify(result)
-                    action=result.get("action")
-                    if reporter and action in {"place_order","cancel_order","cancel_open_orders","set_trading_enabled","positions","orders_today"}:
-                        if action in {"place_order","cancel_order","cancel_open_orders"} and post_delay:
-                            time.sleep(post_delay)
-                        refresh("post_action",result.get("id"))
                     if result.get("status")=="unknown":
                         if automatic_reconciliation:
                             if not result.get("duplicate") or not reconciliation_required:
@@ -267,6 +251,7 @@ def _consume(runner, config, max_messages=0):
     finally:
         consumer.close()
         if monitor:monitor.close()
+        if reporter:reporter.close()
         if publisher:publisher.close()
         if producer:
             producer.close()

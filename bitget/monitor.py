@@ -32,6 +32,9 @@ def fingerprint(snapshot):
     return hashlib.sha256(json.dumps(state, sort_keys=True).encode()).hexdigest()[:24]
 
 
+from common.holdings_timer import PositionProjection
+
+
 class StockMonitor:
     def __init__(self, runner, publisher):
         self.runner, self.adapter, self.publisher = runner, runner.adapter, publisher
@@ -40,7 +43,7 @@ class StockMonitor:
         self.poll_seconds = min(1.0, self._seconds('poll_seconds', 1.0, .02, 30))
         self.burst_seconds = self._seconds('burst_seconds', 2, 0, 5)
         self.burst_poll_seconds = self._seconds('burst_poll_seconds', .25, .02, 30)
-        self.account_seconds = self._seconds('account_seconds', 5, 1, 300)
+        self.account_seconds = self._seconds('account_seconds', 30, 1, 300)
         self.reconcile_seconds = self._seconds('reconcile_seconds', 60, 30, 3600)
         self.discovery_seconds = self._seconds('discovery_seconds', 300, 60, 86400)
         summary_seconds = self._seconds('summary_seconds', 60, 10, 3600)
@@ -50,7 +53,6 @@ class StockMonitor:
         self.log = LatencyLog(self.log_path, summary_seconds)
         self.stop_event = threading.Event()
         self.wake = threading.Event()
-        self.account_wake = threading.Event()
         self.lock = threading.Lock()
         self.inbox = queue.Queue(maxsize=4)
         self.priority = deque(maxlen=256)
@@ -59,8 +61,7 @@ class StockMonitor:
         self.status = {}
         self.started_at = datetime.now(timezone.utc)
         self.burst_until = 0.0
-        self.account_until = 0.0
-        self.account_trigger = None
+        self.positions = PositionProjection(self.publisher.publish_account)
         self.known = {}
         self.broker_times = {}
         self.last_seen = {}
@@ -88,6 +89,7 @@ class StockMonitor:
         # snapshots need no resend or in-memory retry entry.
         self.pending = {k: {f: v for f, v in s.items() if f != 'sequence'}
                         for k, s in self.known.items() if fingerprint(s) != fingerprint(restored[k])}
+        self.positions.observe(self.known.values())
         self.publisher.delivery_observer = self._delivered
         self.adapter.request_observer = self.log.emit
         self.log.emit('monitor_started', transport='rest', poll_seconds=self.poll_seconds,
@@ -118,7 +120,6 @@ class StockMonitor:
                 self.failure = exc
                 self.stop_event.set()
                 self.wake.set()
-                self.account_wake.set()
 
     def _success(self, lane):
         with self.lock:
@@ -155,7 +156,6 @@ class StockMonitor:
         self.log.emit('monitor_command_wakeup', action=result['action'], command_id=result.get('id'),
                       order_count=len(identities))
         self.wake.set()
-        self.account_wake.set()
 
     def _observe(self, rows, source, observed_at, observed_mono):
         self.feedback.refresh()
@@ -212,10 +212,10 @@ class StockMonitor:
                 self.known[identity] = snapshot
                 self.pending[identity] = snapshot
                 self.log.emit('monitor_order_observed', **metadata)
-                with self.lock:
-                    self.account_until = time.monotonic() + 10
-                    self.account_trigger = observed_mono
-                self.account_wake.set()
+                try:
+                    self.positions.observe([snapshot])
+                except Exception as exc:
+                    self._error('position_delta', exc)
                 result = self.publisher.publish_orders([snapshot])
                 if result['failed']:
                     self.log.emit('monitor_publication_failure', failed=result['failed'])
@@ -318,52 +318,23 @@ class StockMonitor:
     def _account(self):
         # Never share the command journal's SQLite connection across threads.
         db = sqlite3.connect(self.runner.journal_path.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)
-        previous = None
-        next_refresh = 0.0
-        backoff = 0.0
-        retry_at = 0.0
+        due = time.monotonic()
         try:
-            while not self.stop_event.is_set():
-                self.account_wake.wait(max(0, next_refresh - time.monotonic()))
-                self.account_wake.clear()
-                if self.stop_event.is_set():
-                    break
-                if self.stop_event.wait(max(0, retry_at - time.monotonic())):
-                    break
+            while not self.stop_event.wait(max(0, due - time.monotonic())):
                 started = time.monotonic()
+                token = self.positions.begin()
                 try:
                     account = {**self.adapter.snapshot_account(), **self.routing,
-                               'trading_enabled': self._account_enabled(db)}
-                    state = json.dumps(account, sort_keys=True)
-                    changed = state != previous
-                    account['ts'] = datetime.now(timezone.utc).isoformat()
-                    observed = time.monotonic()
-                    self.publisher.publish_account(account)
-                    with self.lock:
-                        trigger = self.account_trigger
-                    self.log.emit('monitor_account', changed=changed, baseline=previous is None,
-                                  refresh_ms=round((observed - started) * 1000, 3),
-                                  observed_to_kafka_ack_ms=round((time.monotonic() - observed) * 1000, 3),
-                                  since_order_observed_ms=round((time.monotonic() - trigger) * 1000, 3)
-                                  if trigger is not None and started >= trigger else None)
-                    previous = state
+                               'trading_enabled': self._account_enabled(db),
+                               'ts': datetime.now(timezone.utc).isoformat()}
+                    self.positions.checkpoint(token, account)
+                    self.log.emit('monitor_account', refresh_ms=round((time.monotonic()-started)*1000, 3))
                     self._success('account')
-                    backoff = 0.0
-                    retry_at = 0.0
                 except MonitorStopped:
                     break
                 except Exception as exc:
                     self._error('account', exc)
-                    backoff = min(30, max(1, backoff * 2))
-                    retry_at = time.monotonic() + backoff
-                with self.lock:
-                    interval = 1 if time.monotonic() < self.account_until else self.account_seconds
-                    if interval != 1:
-                        self.account_trigger = None
-                next_refresh = max(started + interval, time.monotonic() + backoff)
-                # Coalesce changes during this fetch; bound asset reads to 1 Hz.
-                if self.stop_event.wait(max(0, started + 1 - time.monotonic())):
-                    break
+                due += self.account_seconds * max(1, math.floor((time.monotonic()-due)/self.account_seconds)+1)
         finally:
             db.close()
 
@@ -407,7 +378,6 @@ class StockMonitor:
             return
         self.stop_event.set()
         self.wake.set()
-        self.account_wake.set()
         # Requests have finite timeouts; quota/backoff waits are interruptible.
         # Join before the consumer closes the publisher/producer they use.
         for thread in self.threads:

@@ -239,7 +239,7 @@ class SnapshotPublisher:
             raise PublicationError("Kafka returned no valid snapshot delivery acknowledgement")
         return {"topic": topic, "partition": metadata.partition, "offset": metadata.offset}
 
-    def publish_account(self, snapshot):
+    def publish_account(self, snapshot, full=None):
         """Publish current canonical holdings; errors propagate to the caller."""
         if not isinstance(snapshot, dict) or not {"account_id", "cash", "positions", "ts", "trading_enabled"} <= snapshot.keys():
             raise PublicationError("Account snapshot has missing fields")
@@ -282,7 +282,8 @@ class SnapshotPublisher:
             if not hasattr(self, '_account_deltas'):
                 self._account_deltas = AccountDeltaPublisher()
             return self._account_deltas.publish(value,
-                lambda event: self._send(self.account_topic, self.account.encode(), event))
+                lambda event: self._send(self.account_topic, self.account.encode(), event),
+                force=bool(full), automatic_checkpoint=full is None)
 
     def _read(self, order_id):
         row = self.db.execute("SELECT published,pending FROM snapshot_publications WHERE account_id=? AND order_id=?", (self.account, order_id)).fetchone()

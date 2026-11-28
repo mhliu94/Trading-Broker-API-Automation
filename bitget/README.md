@@ -74,10 +74,7 @@ retry from the durable outbox, so consumers must tolerate duplicate delivery.
 
 After a
 command completes, the monitor wakes immediately and requests a 250 ms cadence
-for up to two seconds, subject to the quota and request duration. Cash and
-positions refresh independently every five seconds, immediately after an order
-change subject to a one-second minimum spacing, then once per second for three
-seconds. A broader today/history reconciliation runs every 60 seconds to catch
+for up to two seconds, subject to the quota and request duration. Cash and positions refresh on a separate 30-second timer. Order observations update the local positions from cumulative fills. A broader today/history reconciliation runs every 60 seconds to catch
 orders that were created and completed between polls, including manual orders.
 After initial discovery, history sweeps request only the interval since the previous successful read, with a one-second overlap across midnight. Discovery of older active orders uses
 the same nonterminal status filters every 300 seconds. These slower checks and

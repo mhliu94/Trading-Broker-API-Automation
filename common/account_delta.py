@@ -110,7 +110,7 @@ class AccountDeltaPublisher:
         self.pending = None
         return receipt
 
-    def publish(self, snapshot, send, force=False):
+    def publish(self, snapshot, send, force=False, *, automatic_checkpoint=True):
         state = normalize(snapshot)
         with self.lock:
             receipt = None
@@ -122,7 +122,7 @@ class AccountDeltaPublisher:
                     raise ValueError('Publisher account identity changed')
                 if _timestamp(state['ts']) < _timestamp(old['ts']):
                     return receipt  # A slower concurrent read cannot undo a newer observation.
-            full = old is None or force or self.clock() - self.last_checkpoint >= self.checkpoint_seconds
+            full = old is None or force or (automatic_checkpoint and self.clock() - self.last_checkpoint >= self.checkpoint_seconds)
             if full:
                 event = deepcopy(state)
             else:

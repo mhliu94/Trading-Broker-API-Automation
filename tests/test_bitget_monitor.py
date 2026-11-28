@@ -67,12 +67,11 @@ def logs(monitor):
 def test_fill_and_cancel_publish_immediately_without_waiting_for_account(monitor):
     initial = raw()
     observe(monitor, [initial])
-    monitor.account_wake.clear()
     partial = {**initial, 'status': 'PartialFilled', 'executedQuantity': '1', 'executedPrice': '190'}
     observe(monitor, [partial])
     observe(monitor, [{**partial, 'status': 'Canceled'}])
     assert [r['status'] for _, r in monitor.publisher.producer.sent] == ['NEW', 'PARTIALLY_FILLED', 'CANCELED']
-    assert monitor.account_wake.is_set()
+    assert not monitor.positions.open_orders
     deliveries = [r for r in logs(monitor) if r['event'] == 'monitor_order_delivery']
     assert deliveries[0]['baseline']
     assert not deliveries[1]['baseline'] and not deliveries[2]['baseline']

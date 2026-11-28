@@ -24,7 +24,7 @@
     "burst_poll_seconds": 0.25,
     "burst_seconds": 2,
     "command_reserve": 5,
-    "account_seconds": 5,
+    "account_seconds": 30,
     "reconcile_seconds": 60,
     "discovery_seconds": 300,
     "summary_seconds": 60

@@ -1,14 +1,20 @@
 # Account changes and Linux services
 
-Workers poll broker order status at a target interval of one second or less.
-Changes to status or cumulative fill quantity trigger a fresh positions/cash query.
-Asset reads repeat for ten seconds after a change to cover delayed broker settlement.
-Network latency, broker throttling and serial API requests can extend the observed interval.
+A background timer reads broker positions and cash at startup and every 30 seconds.
+Order submission, cancellation, and order-status changes leave this schedule alone.
+Order observers retain working tickets and cumulative fills. Each new filled share
+increments the position on a buy or decrements it on a sell. The account report carries
+the resulting absolute position row, or a removal when its quantity reaches zero.
+Cash and newly available selling power come from the broker checkpoint.
+
+A single account writer orders checkpoints and deltas on the existing sequence.
+A checkpoint that overlaps an observed fill preserves the newer local position for
+that symbol. A later quiet checkpoint reconciles it. A broker that reports assets
+and executions at different times can still cause a temporary discrepancy.
 
 `account-details` uses the UTF-8 account ID as the Kafka key. Version 1 messages
 have `account_update_version`, `message_type`, `stream_id`, `sequence`, account IDs
-and a UTC `ts`. Each process starts with `account_snapshot`; full checkpoints recur
-on the first successful asset query at least 30 seconds after the previous checkpoint.
+and a UTC `ts`. Each process starts with `account_snapshot`; each successful periodic asset read publishes a full checkpoint.
 
 `account_delta` has `base_sequence`, changed absolute position rows in `positions`,
 explicit `removed_positions`, and only changed cash/trading fields. Currency maps

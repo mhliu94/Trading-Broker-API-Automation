@@ -42,9 +42,9 @@ def _rows(value, label):
     return value
 
 
-def _is_open(row, field, opened, closed, pending=()):
+def _is_open(row, field, opened, closed, pending=(), *, include_pending=False):
     state = row.get(field)
-    if state in opened:
+    if state in opened or (include_pending and state in pending):
         return True
     if state in closed or state in pending:
         return False
@@ -99,7 +99,7 @@ def _rh_orders(adapter):
     return _unique(_rows(adapter.open_stock_orders(), "Robinhood US stock"), "order_id")
 
 
-def _ts_orders(adapter):
+def _ts_orders(adapter, *, include_pending=False):
     accounts = adapter._accounts()
     rows = []
     for offset in range(0, len(accounts), 10):
@@ -109,10 +109,10 @@ def _ts_orders(adapter):
         if row.get("AccountID") not in accounts:
             raise BrokerError("TradeStation cancellation read returned another account")
     return [{**row, "order_id": row["OrderID"]} for row in _unique(rows, "OrderID")
-            if adapter.is_us_stock_order(row) and _is_open(row, "Status", TS_OPEN, TS_CLOSED, TS_PENDING)]
+            if adapter.is_us_stock_order(row) and _is_open(row, "Status", TS_OPEN, TS_CLOSED, TS_PENDING, include_pending=include_pending)]
 
 
-def _long_orders(adapter):
+def _long_orders(adapter, *, include_pending=False):
     # Today is not documented to include older GTC orders. Explicit epoch-to-now
     # history filters avoid the endpoint's implicit 90-day lookback. has_more and
     # the 1000-record ceiling require interval subdivision, before any writes.
@@ -123,7 +123,7 @@ def _long_orders(adapter):
         if calls > int(adapter.config.get("max_pages", 10000)):
             raise BrokerError("Longbridge cancellation discovery limit reached; no cancellations sent")
         params = [("start_at", str(lower)), ("end_at", str(upper))]
-        params += [("status", state) for state in sorted(LONG_OPEN)]
+        params += [("status", state) for state in sorted(LONG_OPEN | LONG_PENDING if include_pending else LONG_OPEN)]
         response = adapter._request("get", "/v1/trade/order/history?" + urlencode(params))
         if not isinstance(response, dict) or type(response.get("has_more", False)) is not bool:
             raise BrokerError("Invalid Longbridge cancellation history response")
@@ -143,10 +143,10 @@ def _long_orders(adapter):
     for row in _rows(today.get("orders"), "Longbridge"):
         by_id[_id(row.get("order_id"))] = row
     return [row for row in by_id.values()
-            if adapter.is_us_stock_order(row) and _is_open(row, "status", LONG_OPEN, LONG_CLOSED, LONG_PENDING)]
+            if adapter.is_us_stock_order(row) and _is_open(row, "status", LONG_OPEN, LONG_CLOSED, LONG_PENDING, include_pending=include_pending)]
 
 
-def _webull_orders(adapter):
+def _webull_orders(adapter, *, include_pending=False):
     account = adapter._account_id()
     groups = list(adapter._pages(adapter._client().order_v3.list_order_open, account_id=account))
     rows = []
@@ -157,14 +157,14 @@ def _webull_orders(adapter):
             if row.get("account_id", account) != account:
                 raise BrokerError("Webull cancellation read returned another account")
             if adapter.is_us_stock_order(row) and _is_open(row, "status", {"PENDING", "SUBMITTED", "PARTIAL_FILLED", "PARTIAL FILLED"},
-                        {"FILLED", "CANCELLED", "FAILED", "EXPIRED", "REJECTED"}, {"PENDING_CANCEL"}):
+                        {"FILLED", "CANCELLED", "FAILED", "EXPIRED", "REJECTED"}, {"PENDING_CANCEL"}, include_pending=include_pending):
                 # SDK v3 accepts client_order_id, never the broker order_id.
                 _id(row.get("client_order_id"))
                 rows.append({**row, "order_id": row.get("order_id") or row["client_order_id"]})
     return _unique(rows, "order_id")
 
 
-def _bitget_orders(adapter, command=None):
+def _bitget_orders(adapter, command=None, *, include_pending=False):
     if command:
         row=adapter.stock_order_detail(command["order_id"])
         if command.get("symbol") is not None and adapter.stock_symbol(command["symbol"]) != row["symbol"]:
@@ -175,7 +175,7 @@ def _bitget_orders(adapter, command=None):
         rows=[{**row,"order_id":row.get("order_id") or row["orderId"]} for row in rows]
     opened={"NotReported","ReplacedNotReported","ProtectedNotReported","VarietiesNotReported","WaitToNew","New","WaitToReplace","PendingReplace","Replaced","PartialFilled"}
     closed={"Filled","Rejected","Canceled","Expired","PartialWithdrawal"}
-    return _unique([row for row in rows if _is_open(row,"status",opened,closed,{"WaitToCancel","PendingCancel"})],"order_id")
+    return _unique([row for row in rows if _is_open(row,"status",opened,closed,{"WaitToCancel","PendingCancel"}, include_pending=include_pending)],"order_id")
 
 
 def _send(adapter, broker, row):
@@ -273,7 +273,7 @@ def _zhuorui(adapter, operation, command):
             "scope": "Configured account's US orders returned by the upstream current-orders endpoint"}
 
 
-def _discover_open_orders(adapter, broker):
+def _discover_open_orders(adapter, broker, *, include_pending=False):
     """Read and validate the entire cancellation scope before any writes."""
     if broker=="alpaca":
         rows=[];seen=set();params={"status":"open","limit":500,"direction":"desc","nested":"false"}
@@ -289,7 +289,8 @@ def _discover_open_orders(adapter, broker):
     else:
         loaders={"robinhood":_rh_orders,"tradestation":_ts_orders,"longbridge":_long_orders,"webull":_webull_orders,"bitget":_bitget_orders}
         if broker not in loaders:raise CommandError("Unknown cancellation broker")
-        rows=loaders[broker](adapter)
+        rows=(loaders[broker](adapter, include_pending=True) if include_pending and broker != "robinhood"
+              else loaders[broker](adapter))
     return rows
 
 

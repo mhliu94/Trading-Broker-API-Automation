@@ -256,6 +256,9 @@ def run(request):
             raise ApiError("Zhuorui upstream account/server selectors differ from the shared broker config")
     client = ApiClient(load_session(settings.session_file, config), settings)
     operation, payload = request["operation"], request.get("payload", {})
+    if operation == "working_order_dates":
+        return [[str(row["orderTxnReference"]), int(row["entrustTime"])] for row in _rows(client.query("orders"))
+                if is_us_stock_row(row) and row.get("orderTxnReference") and row.get("entrustTime")]
     if operation == "account_snapshot":
         from zhuorui.api.snapshot import account_snapshot
         return account_snapshot(config, stock_holdings(client.query("holdings")), client.query("cash"), client.query("account"))
@@ -294,7 +297,7 @@ def main():
         # Executions can catch session failures after submission or during
         # timed cancellation. No mutation retry guarantee is inferred here.
         auth_failure = session_authentication_error(exc) and operation in {
-            "positions", "orders_today", "tradability", "account_snapshot", "order_snapshots"
+            "positions", "orders_today", "tradability", "account_snapshot", "order_snapshots", "working_order_dates"
         }
         if auth_failure:
             message = "Zhuorui session expired or was displaced; refresh the session before continuing"

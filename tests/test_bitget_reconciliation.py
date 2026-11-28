@@ -121,7 +121,8 @@ def test_three_exponential_attempts_then_keep_polling_and_snapshots_alive(runner
     assert read_times == [10, 30, 70]
     assert consumer.poll.call_count == 8 and consumer.commit.call_count == 1
     assert set(consumer.observed_statuses) == {"running"}
-    assert any(call.args[0] == "periodic" for call in reporter.refresh.call_args_list)
+    reporter.start.assert_called_once()
+    reporter.refresh.assert_not_called()
     runner.adapter.cancel_stock_order.assert_not_called()
     health = json.loads(runner.journal_path.with_suffix(".status.json").read_text())
     assert health["reconciliation"]["status"] == "pending" and health["processed"] == 1

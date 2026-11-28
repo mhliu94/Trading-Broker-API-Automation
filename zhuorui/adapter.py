@@ -151,7 +151,7 @@ class Adapter:
         if result.returncode or not response.get("ok"):
             error = response.get("error", "Zhuorui bridge failed")
             if (response.get("authentication_error") is True and response.get("no_submission") is True
-                    and operation in {"positions", "orders_today", "tradability", "account_snapshot", "order_snapshots"}):
+                    and operation in {"positions", "orders_today", "tradability", "account_snapshot", "order_snapshots", "working_order_dates"}):
                 raise AuthenticationError("Zhuorui session expired or was displaced; refresh the session before continuing", no_submission=True)
             if response.get("outcome_unknown"):
                 raise OutcomeUnknown(error)

@@ -23,10 +23,13 @@ def setup(monkeypatch,tmp_path,*,refresh_error=False,auth_error=False):
     monkeypatch.setattr("common.publication.SnapshotPublisher",Mock(return_value=publisher))
     class Reporter:
         def __init__(self,*_):pass
-        def refresh(self,trigger,command_id=None):
-            calls.append(trigger)
-            if refresh_error and trigger=="post_action":raise BrokerError("publication unavailable")
-            return {"errors":[{"error_type":"AuthenticationError"}] if auth_error else [],"trigger":trigger}
+        def start(self,interval,report_error):
+            from common.errors import AuthenticationError
+            calls.append("startup")
+            if auth_error: report_error(AuthenticationError("offline verification"))
+            elif refresh_error: report_error(BrokerError("report unavailable"))
+        def close(self):
+            calls.append("reporter_closed")
     monkeypatch.setattr("common.reporting.RuntimeSnapshots",Reporter)
     monkeypatch.setattr("common.consumer.time.monotonic",lambda:clock[0])
     def sleep(seconds):calls.append("delay");clock[0]+=seconds
@@ -38,24 +41,24 @@ def setup(monkeypatch,tmp_path,*,refresh_error=False,auth_error=False):
     return runner,config,consumer,producer,publisher,calls
 
 
-def test_startup_idle_periodic_and_post_action_refresh(monkeypatch,tmp_path):
+def test_startup_reporter_is_independent_of_commands(monkeypatch,tmp_path):
     runner,config,consumer,producer,publisher,calls=setup(monkeypatch,tmp_path)
     consume(runner,config,max_messages=1)
-    assert calls==["startup","poll","periodic","poll","execute","commit","delay","post_action"]
+    assert calls==["startup","poll","poll","execute","commit","reporter_closed"]
     consumer.close.assert_called_once();publisher.close.assert_called_once();producer.close.assert_called_once()
 
 
 def test_post_action_reporting_failure_does_not_replay_completed_order(monkeypatch,tmp_path):
     runner,config,consumer,_,_,calls=setup(monkeypatch,tmp_path,refresh_error=True)
     consume(runner,config,max_messages=1)
-    assert calls.index("commit")<calls.index("post_action")
+    assert "post_action" not in calls and "delay" not in calls
     runner.process.assert_called_once();consumer.commit.assert_called_once()
 
 
 def test_startup_authentication_failure_stops_before_intake(monkeypatch,tmp_path):
     runner,config,consumer,_,_,calls=setup(monkeypatch,tmp_path,auth_error=True)
     consume(runner,config,max_messages=1)
-    assert calls==["startup"]
+    assert calls==["startup","reporter_closed"]
     consumer.poll.assert_not_called();consumer.commit.assert_not_called();runner.process.assert_not_called()
 
 
